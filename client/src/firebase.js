@@ -3,14 +3,14 @@ import { getAuth, signInAnonymously, setPersistence, browserSessionPersistence }
 import { getDatabase } from "firebase/database";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyD52mGoUynNXojxwK7s1WzUQOY8wznvewo",
-  authDomain: "l3tt3r.firebaseapp.com",
-  projectId: "l3tt3r",
-  storageBucket: "l3tt3r.firebasestorage.app",
-  messagingSenderId: "1029380131968",
-  appId: "1:1029380131968:web:65fd7baf63801211a4ea65",
-  measurementId: "G-CVD17H5V5W",
-  databaseURL: "https://l3tt3r-default-rtdb.firebaseio.com"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
+  databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL
 };
 
 // Initialize Firebase
