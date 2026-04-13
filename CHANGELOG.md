@@ -12,3 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Firebase Realtime Database integration.
 - Multiplayer matchmaking, game states, and loop logic implemented.
 - English-to-Chinese translation for guessed words.
+
+## [0.0.2] - 2026-04-13
+### Security
+- Hardened database security rules to prevent unauthorized data access and modifications.
+- Improved environment configuration management for enhanced security.
