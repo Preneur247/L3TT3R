@@ -1,6 +1,7 @@
 import { initializeApp } from "firebase/app";
-import { getAuth, signInAnonymously, setPersistence, browserSessionPersistence } from "firebase/auth";
+import { getAuth, signInAnonymously, setPersistence, browserLocalPersistence } from "firebase/auth";
 import { getDatabase } from "firebase/database";
+import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -17,9 +18,9 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getDatabase(app);
+const firestore = getFirestore(app);
 
-// Use SESSION persistence so each browser tab gets its own unique anonymous UID.
-// Without this, two tabs in the same browser share the same user = both think they're player1.
-const initAuth = () => setPersistence(auth, browserSessionPersistence).then(() => signInAnonymously(auth));
+// Use LOCAL persistence so guests remain logged in across sessions/tabs
+const initAuth = () => setPersistence(auth, browserLocalPersistence).then(() => signInAnonymously(auth));
 
-export { auth, db, initAuth };
+export { auth, db, firestore, initAuth };

@@ -1,7 +1,15 @@
 {
   "rules": {
     "lobby": {
-      "waiting": {
+      "public_waiting": {
+        "$mode": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        }
+      }
+    },
+    "room_codes": {
+      "$code": {
         ".read": "auth != null",
         ".write": "auth != null"
       }

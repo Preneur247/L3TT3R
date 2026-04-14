@@ -1,0 +1,26 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // User Profiles
+    match /users/{userId} {
+      // Anyone logged in can read a profile to see opponent stats
+      allow read: if request.auth != null;
+      // Only the authenticated user can create/update their own profile
+      // In a real production app, you might validate that they aren't inflating 'wins'
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Name Registry — one doc per base username, tracks incremental tag counter
+    match /claimed_usernames/{username} {
+      allow read: if request.auth != null;
+      // First claim: create the counter doc starting at nextTag: 2
+      allow create: if request.auth != null
+        && request.resource.data.nextTag == 2;
+      // Subsequent claims: only allow incrementing nextTag by 1
+      allow update: if request.auth != null
+        && request.resource.data.nextTag == resource.data.nextTag + 1;
+      allow delete: if false;
+    }
+  }
+}

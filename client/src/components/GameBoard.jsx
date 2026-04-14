@@ -3,21 +3,16 @@ import { createPortal } from 'react-dom';
 import { ref, update, onValue, get } from 'firebase/database';
 import { db } from '../firebase';
 
-// Simple translation helper (Client-side)
-const getTranslation = async (word) => {
-  try {
-    const res = await fetch(`https://api.mymemory.translated.net/get?q=${word}&langpair=en|zh-TW`);
-    const data = await res.json();
-    return data.responseData.translatedText;
-  } catch (e) {
-    return "翻譯不可用";
-  }
-};
-
 function getTimerClass(seconds) {
   if (seconds > 30) return 'safe';
   if (seconds > 10) return 'warning';
   return 'danger';
+}
+
+function getDifficultyLabel(d) {
+  if (d === 0) return 'Easy';
+  if (d === 1) return 'Medium';
+  return 'Hard';
 }
 
 export default function GameBoard({ user, matchId, matchData }) {
@@ -25,9 +20,11 @@ export default function GameBoard({ user, matchId, matchData }) {
   const [letter, setLetter] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [timeLeft, setTimeLeft] = useState(99);
-  const [dictionary, setDictionary] = useState(new Set());
-  const [dictLoading, setDictLoading] = useState(true);
-  const dictionaryLoaded = useRef(false);
+  
+  // Sharding Dictionary State
+  const [activeShard, setActiveShard] = useState(null); // Array of {w, t, d}
+  const [dictLoading, setDictLoading] = useState(false);
+  const shardCache = useRef({}); // { "a-e": [...] }
   // Persistent off-screen input: focusing it during a button-click handler
   // keeps the iOS keyboard open while we wait for Firebase / React to render
   // the next real input (focus transitions input→input, keyboard never closes).
@@ -45,23 +42,33 @@ export default function GameBoard({ user, matchId, matchData }) {
   const gameWinsTracked = matchData.player1GameWins !== undefined || matchData.player2GameWins !== undefined;
   const winTarget = matchData.winTarget || 5;
 
-  // Load Dictionary
+  // Load Shard when guessing phase starts
   useEffect(() => {
-    if (dictionaryLoaded.current) return;
-    setDictLoading(true);
-    fetch('https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt')
-      .then(res => res.text())
-      .then(text => {
-        const words = text.split('\n').map(w => w.trim().toUpperCase());
-        setDictionary(new Set(words));
-        dictionaryLoaded.current = true;
+    if (matchData.state === 'GUESSING' && matchData.startLetter && matchData.endLetter) {
+      const key = `${matchData.startLetter.toLowerCase()}-${matchData.endLetter.toLowerCase()}`;
+      
+      if (shardCache.current[key]) {
+        setActiveShard(shardCache.current[key]);
         setDictLoading(false);
-      })
-      .catch(() => {
-        setDictLoading(false);
-        setErrorMsg('Failed to load dictionary. Please refresh.');
-      });
-  }, []);
+        return;
+      }
+
+      setDictLoading(true);
+      fetch(`/dict/${key}.json`)
+        .then(res => res.json())
+        .then(data => {
+          shardCache.current[key] = data;
+          setActiveShard(data);
+          setDictLoading(false);
+        })
+        .catch(() => {
+          setDictLoading(false);
+          setErrorMsg('Failed to load dictionary shard.');
+        });
+    } else if (matchData.state !== 'GUESSING') {
+      setActiveShard(null);
+    }
+  }, [matchData.state, matchData.startLetter, matchData.endLetter]);
 
   // Reset local state on next round
   useEffect(() => {
@@ -72,7 +79,6 @@ export default function GameBoard({ user, matchId, matchData }) {
     }
   }, [matchData.state, matchData.currentRound]);
 
-  // Timer logic
   useEffect(() => {
     if (matchData.state === 'GUESSING' && matchData.roundStartTime) {
       const interval = setInterval(() => {
@@ -81,13 +87,37 @@ export default function GameBoard({ user, matchId, matchData }) {
         setTimeLeft(remaining);
 
         if (remaining === 0 && isP1) {
-          // Trigger timeout handling (P1 handles logic to avoid double updates)
           handleTimeout();
         }
       }, 1000);
       return () => clearInterval(interval);
     }
   }, [matchData.state, matchData.roundStartTime]);
+
+  // System Auto-Generation logic
+  useEffect(() => {
+    if (matchData.state === 'PICKING_LETTERS' && matchData.letterMode === 'system' && isP1) {
+      const generateSystemLetters = async () => {
+        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        const start = chars[Math.floor(Math.random() * chars.length)];
+        const end = chars[Math.floor(Math.random() * chars.length)];
+        
+        const matchRef = ref(db, `matches/${matchId}`);
+        await update(matchRef, {
+          state: 'GUESSING',
+          startLetter: start,
+          endLetter: end,
+          roundStartTime: Date.now(),
+          player1Letter: null,
+          player2Letter: null
+        });
+      };
+      
+      // Small delay for smooth transition feel
+      const timer = setTimeout(generateSystemLetters, 800);
+      return () => clearTimeout(timer);
+    }
+  }, [matchData.state, matchData.letterMode, isP1, matchId]);
 
   const handleTimeout = async () => {
     const matchRef = ref(db, `matches/${matchId}`);
@@ -140,7 +170,13 @@ export default function GameBoard({ user, matchId, matchData }) {
       setErrorMsg(`Must start with ${matchData.startLetter} and end with ${matchData.endLetter}`);
       return;
     }
-    if (!dictionary.has(cleanWord)) {
+    if (!activeShard) {
+      setErrorMsg('Dictionary is not ready...');
+      return;
+    }
+
+    const wordEntry = activeShard.find(item => item.w === cleanWord);
+    if (!wordEntry) {
       setErrorMsg("Not a valid word");
       return;
     }
@@ -166,17 +202,10 @@ export default function GameBoard({ user, matchId, matchData }) {
       lastRoundResult: {
         winnerId: user.uid,
         word: cleanWord,
-        translation: null,
+        translation: wordEntry.t,
+        difficulty: wordEntry.d,
         reason: 'correct'
       }
-    });
-
-    // 2. FETCH TRANSLATION ASYNC
-    const translation = await getTranslation(cleanWord);
-
-    // 3. UPDATE DB WITH TRANSLATION (Popping in shortly after)
-    await update(matchRef, {
-      'lastRoundResult/translation': translation
     });
   };
 
@@ -292,37 +321,48 @@ export default function GameBoard({ user, matchId, matchData }) {
 
         {matchData.state === 'PICKING_LETTERS' && (
           <div className="pick-section">
-            <h2>
-              {!myLetter
-                ? `Pick the ${myRole === 'START' ? 'starting' : 'ending'} letter`
-                : 'Waiting for opponent...'}
-            </h2>
-            {myLetter && (
-              <div className="locked-confirmation">You locked: {myLetter}</div>
+            {matchData.letterMode === 'system' ? (
+               <div style={{ textAlign: 'center' }}>
+                 <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem' }}>
+                   <span className="spinner" style={{ width: '2rem', height: '2rem' }} />
+                 </div>
+                 <h2 className="pulse">System is choosing letters...</h2>
+               </div>
+            ) : (
+              <>
+                <h2>
+                  {!myLetter
+                    ? `Pick the ${myRole === 'START' ? 'starting' : 'ending'} letter`
+                    : 'Waiting for opponent...'}
+                </h2>
+                {myLetter && (
+                  <div className="locked-confirmation">You locked: {myLetter}</div>
+                )}
+                {/* Keep input mounted even while waiting so keyboard stays open.
+                    Hidden via opacity/height when locked; autoFocus opens keyboard. */}
+                <form
+                  onSubmit={e => { e.preventDefault(); submitPick(); }}
+                  style={{
+                    overflow: 'hidden',
+                    height: myLetter ? 0 : 'auto',
+                    opacity: myLetter ? 0 : 1,
+                    pointerEvents: myLetter ? 'none' : 'auto',
+                  }}
+                >
+                  <input
+                    type="text"
+                    maxLength="1"
+                    value={letter}
+                    onChange={e => setLetter(e.target.value.toUpperCase())}
+                    style={{ textTransform: 'uppercase' }}
+                    autoFocus
+                  />
+                  <div className="controls">
+                    <button className="primary" type="submit">Lock</button>
+                  </div>
+                </form>
+              </>
             )}
-            {/* Keep input mounted even while waiting so keyboard stays open.
-                Hidden via opacity/height when locked; autoFocus opens keyboard. */}
-            <form
-              onSubmit={e => { e.preventDefault(); submitPick(); }}
-              style={{
-                overflow: 'hidden',
-                height: myLetter ? 0 : 'auto',
-                opacity: myLetter ? 0 : 1,
-                pointerEvents: myLetter ? 'none' : 'auto',
-              }}
-            >
-              <input
-                type="text"
-                maxLength="1"
-                value={letter}
-                onChange={e => setLetter(e.target.value.toUpperCase())}
-                style={{ textTransform: 'uppercase' }}
-                autoFocus
-              />
-              <div className="controls">
-                <button className="primary" type="submit">Lock</button>
-              </div>
-            </form>
           </div>
         )}
 
@@ -361,12 +401,16 @@ export default function GameBoard({ user, matchId, matchData }) {
 
             {matchData.lastRoundResult.word && (
               <div className="word-block">
-                <div className="word">{matchData.lastRoundResult.word}</div>
+                <div className="word">
+                  {matchData.lastRoundResult.word}
+                  {matchData.lastRoundResult.difficulty !== undefined && (
+                    <span className={`difficulty-tag d-${matchData.lastRoundResult.difficulty}`}>
+                      {getDifficultyLabel(matchData.lastRoundResult.difficulty)}
+                    </span>
+                  )}
+                </div>
                 <div className="chinese">
-                  {matchData.lastRoundResult.translation
-                    ? matchData.lastRoundResult.translation
-                    : <span className="translation-loading"><span className="spinner" /> Translating...</span>
-                  }
+                  {matchData.lastRoundResult.translation || "無翻譯可用"}
                 </div>
               </div>
             )}
