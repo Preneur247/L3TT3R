@@ -824,6 +824,7 @@ export default function Lobby({ user, profile, setMatchId }) {
                 setMode(m.id);
                 setStatus('idle');
                 if (m.id === 'party') setLetterMode('system');
+                else if (m.id === 'versus') setLetterMode('players');
               }}
             >
               {m.icon} {m.label}
