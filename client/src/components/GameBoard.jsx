@@ -9,11 +9,15 @@ function getTimerClass(seconds) {
   return 'danger';
 }
 
-function getDifficultyLabel(d) {
-  if (d === 0) return 'Easy';
-  if (d === 1) return 'Medium';
-  return 'Hard';
-}
+const getTranslation = async (word) => {
+  try {
+    const res = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-TW&dt=t&q=${word}`);
+    const data = await res.json();
+    return data[0][0][0];
+  } catch (e) {
+    return "翻譯不可用";
+  }
+};
 
 export default function GameBoard({ user, matchId, matchData }) {
   const [word, setWord] = useState('');
@@ -21,10 +25,9 @@ export default function GameBoard({ user, matchId, matchData }) {
   const [errorMsg, setErrorMsg] = useState('');
   const [timeLeft, setTimeLeft] = useState(99);
   
-  // Sharding Dictionary State
-  const [activeShard, setActiveShard] = useState(null); // Array of {w, t, d}
-  const [dictLoading, setDictLoading] = useState(false);
-  const shardCache = useRef({}); // { "a-e": [...] }
+  const [dictionary, setDictionary] = useState(new Set());
+  const [dictLoading, setDictLoading] = useState(true);
+  const dictionaryLoaded = useRef(false);
   // Persistent off-screen input: focusing it during a button-click handler
   // keeps the iOS keyboard open while we wait for Firebase / React to render
   // the next real input (focus transitions input→input, keyboard never closes).
@@ -42,33 +45,23 @@ export default function GameBoard({ user, matchId, matchData }) {
   const gameWinsTracked = matchData.player1GameWins !== undefined || matchData.player2GameWins !== undefined;
   const winTarget = matchData.winTarget || 5;
 
-  // Load Shard when guessing phase starts
+  // Load Dictionary
   useEffect(() => {
-    if (matchData.state === 'GUESSING' && matchData.startLetter && matchData.endLetter) {
-      const key = `${matchData.startLetter.toLowerCase()}-${matchData.endLetter.toLowerCase()}`;
-      
-      if (shardCache.current[key]) {
-        setActiveShard(shardCache.current[key]);
+    if (dictionaryLoaded.current) return;
+    setDictLoading(true);
+    fetch('https://raw.githubusercontent.com/dwyl/english-words/refs/heads/master/words_alpha.txt')
+      .then(res => res.text())
+      .then(text => {
+        const words = text.split('\n').map(w => w.trim().toUpperCase());
+        setDictionary(new Set(words));
+        dictionaryLoaded.current = true;
         setDictLoading(false);
-        return;
-      }
-
-      setDictLoading(true);
-      fetch(`/dict/${key}.json`)
-        .then(res => res.json())
-        .then(data => {
-          shardCache.current[key] = data;
-          setActiveShard(data);
-          setDictLoading(false);
-        })
-        .catch(() => {
-          setDictLoading(false);
-          setErrorMsg('Failed to load dictionary shard.');
-        });
-    } else if (matchData.state !== 'GUESSING') {
-      setActiveShard(null);
-    }
-  }, [matchData.state, matchData.startLetter, matchData.endLetter]);
+      })
+      .catch(() => {
+        setDictLoading(false);
+        setErrorMsg('Failed to load dictionary. Please refresh.');
+      });
+  }, []);
 
   // Reset local state on next round
   useEffect(() => {
@@ -170,13 +163,7 @@ export default function GameBoard({ user, matchId, matchData }) {
       setErrorMsg(`Must start with ${matchData.startLetter} and end with ${matchData.endLetter}`);
       return;
     }
-    if (!activeShard) {
-      setErrorMsg('Dictionary is not ready...');
-      return;
-    }
-
-    const wordEntry = activeShard.find(item => item.w === cleanWord);
-    if (!wordEntry) {
+    if (!dictionary.has(cleanWord)) {
       setErrorMsg("Not a valid word");
       return;
     }
@@ -202,10 +189,17 @@ export default function GameBoard({ user, matchId, matchData }) {
       lastRoundResult: {
         winnerId: user.uid,
         word: cleanWord,
-        translation: wordEntry.t,
-        difficulty: wordEntry.d,
+        translation: null,
         reason: 'correct'
       }
+    });
+
+    // 2. FETCH TRANSLATION ASYNC
+    const translation = await getTranslation(cleanWord);
+
+    // 3. UPDATE DB WITH TRANSLATION (Popping in shortly after)
+    await update(matchRef, {
+      'lastRoundResult/translation': translation
     });
   };
 
@@ -403,14 +397,12 @@ export default function GameBoard({ user, matchId, matchData }) {
               <div className="word-block">
                 <div className="word">
                   {matchData.lastRoundResult.word}
-                  {matchData.lastRoundResult.difficulty !== undefined && (
-                    <span className={`difficulty-tag d-${matchData.lastRoundResult.difficulty}`}>
-                      {getDifficultyLabel(matchData.lastRoundResult.difficulty)}
-                    </span>
-                  )}
                 </div>
                 <div className="chinese">
-                  {matchData.lastRoundResult.translation || "無翻譯可用"}
+                  {matchData.lastRoundResult.translation
+                    ? matchData.lastRoundResult.translation
+                    : <span className="translation-loading"><span className="spinner" /> Translating...</span>
+                  }
                 </div>
               </div>
             )}
