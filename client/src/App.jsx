@@ -4,7 +4,6 @@ import { isSignInWithEmailLink, signInWithEmailLink, EmailAuthProvider, linkWith
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { ref, onValue, set, push, onDisconnect, remove, update } from 'firebase/database';
 import Lobby from './components/Lobby';
-import MatchSetup from './components/MatchSetup';
 import GameBoard from './components/GameBoard';
 import SetupProfile from './components/SetupProfile';
 
@@ -136,10 +135,11 @@ function App() {
 
       if (data.winner) {
         setGameState('GAME_OVER');
-      } else if (data.state === 'SETUP_LENGTH' || data.state === 'PICKING_LETTERS' || data.state === 'GUESSING' || data.state === 'ENDED_ROUND') {
+      } else if (data.state === 'PICKING_LETTERS' || data.state === 'GUESSING' || data.state === 'ENDED_ROUND') {
         setGameState('PLAYING');
-      } else if (data.state === 'WAITING') {
-        setGameState('MATCHING');
+      } else {
+        // WAITING, ROOM_READY, SETUP_LENGTH all stay in LOBBY view so the Modal can show over correctly
+        setGameState('LOBBY');
       }
     });
 
@@ -172,18 +172,8 @@ function App() {
           <Lobby user={user} profile={profile} setMatchId={setCurrentMatchId} />
         )}
 
-        {gameState === 'MATCHING' && (
-          <div className="subtitle pulse">Waiting for opponent to connect...</div>
-        )}
-
-        {(gameState === 'PLAYING' || gameState === 'GAME_OVER') && matchData && (
-          <>
-            {matchData.state === 'SETUP_LENGTH' ? (
-              <MatchSetup user={user} profile={profile} matchId={currentMatchId} matchData={matchData} />
-            ) : (
-              <GameBoard user={user} profile={profile} matchId={currentMatchId} matchData={matchData} />
-            )}
-          </>
+        {gameState === 'PLAYING' && matchData && (
+          <GameBoard user={user} profile={profile} matchId={currentMatchId} matchData={matchData} />
         )}
       </div>
 
@@ -201,7 +191,7 @@ function App() {
         const handlePlayAgain = async () => {
           const matchRef = ref(db, `matches/${currentMatchId}`);
           await update(matchRef, {
-            state: 'SETUP_LENGTH',
+            state: 'ROOM_SETUP',
             winner: null,
             gameOverReason: null,
             player1Score: 0,

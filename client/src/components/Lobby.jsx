@@ -58,13 +58,15 @@ export default function Lobby({ user, profile, setMatchId }) {
   const [showSearchModal, setShowSearchModal] = useState(false);
   const [showRoomModal, setShowRoomModal] = useState(false);
   const [roomPlayers, setRoomPlayers] = useState([]);
-  const [showWaitingModal, setShowWaitingModal] = useState(false);
-  const [waitingMatchId, setWaitingMatchId] = useState(null);
+  const [matchData, setMatchData] = useState(null); // Local mirror for room setup sync
+  const [roomSettings, setRoomSettings] = useState({ minWordLength: 3, winTarget: 5 });
   const roomListenerRef = useRef(null);
   const roomMatchIdRef = useRef(null);   // mirrors pendingMatchId for cancelRoom cleanup
   const roomCodeRef = useRef(null);      // mirrors roomCode for cancelRoom cleanup
   const searchListenerRef = useRef(null);
   const waitingListenerRef = useRef(null);
+  const [roomTab, setRoomTab] = useState('room');
+  const [copiedCode, setCopiedCode] = useState(false);
   const [showRules, setShowRules] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showStats, setShowStats] = useState(false);
@@ -72,11 +74,185 @@ export default function Lobby({ user, profile, setMatchId }) {
   const [tutorialMode, setTutorialMode] = useState('versus');
   const [language, setLanguage] = useState('en');         // 'en' | 'zh-TW'
 
+  // ── Utility Room Functions ───────────────────────────────────────────────
+  const initializeRoomListener = (mId) => {
+    if (roomListenerRef.current) roomListenerRef.current();
+    const matchRef = ref(db, `matches/${mId}`);
+
+    const unsub = onValue(matchRef, async (snap) => {
+      const data = snap.val();
+      if (!data) {
+        // Room was deleted by host
+        unsub();
+        roomListenerRef.current = null;
+        setShowRoomModal(false);
+        setMatchData(null);
+        setPendingMatchId(null);
+        setRoomPlayers([]);
+        return;
+      }
+
+      setMatchData(data);
+      setRoomSettings({
+        minWordLength: data.minWordLength || 3,
+        winTarget: data.winTarget || 5
+      });
+      if (data.letterMode) setLetterMode(data.letterMode);
+
+      // Handle transition from Search to Room when player found
+      if (data.state === 'ROOM_SETUP') {
+        setShowSearchModal(false);
+        setShowRoomModal(true);
+      }
+
+      // Transition to game if host started it
+      if (data.state === 'PICKING_LETTERS') {
+        unsub();
+        roomListenerRef.current = null;
+        setShowRoomModal(false);
+        setRoomPlayers([]);
+        setMatchId(mId);
+        return;
+      }
+
+      // Handle players list
+      const players = [];
+      // P1 (always exists if match exists)
+      let p1Username = 'Host';
+      try {
+        const p1Snap = await getDoc(doc(firestore, 'users', data.player1));
+        if (p1Snap.exists()) p1Username = p1Snap.data().username;
+      } catch {}
+      players.push({ uid: data.player1, username: p1Username, isHost: true });
+
+      if (data.player2) {
+        let p2Username = 'Player 2';
+        try {
+          const p2Snap = await getDoc(doc(firestore, 'users', data.player2));
+          if (p2Snap.exists()) p2Username = p2Snap.data().username;
+        } catch {}
+        players.push({ uid: data.player2, username: p2Username, isHost: false });
+      }
+      setRoomPlayers(players);
+    });
+
+    roomListenerRef.current = unsub;
+  };
+
+  const updateRoomSetting = async (key, val) => {
+    if (!pendingMatchId || user.uid !== matchData?.player1) return;
+    try {
+      await update(ref(db, `matches/${pendingMatchId}`), { [key]: val });
+    } catch (err) {
+      console.error('Update setting error:', err);
+    }
+  };
+
+  const copyRoomCode = () => {
+    if (!matchData?.roomCode) return;
+    navigator.clipboard.writeText(matchData.roomCode).then(() => {
+      setCopiedCode(true);
+      setTimeout(() => setCopiedCode(false), 2000);
+    });
+  };
+
+  const cancelRoom = async () => {
+    if (roomListenerRef.current) {
+      roomListenerRef.current();
+      roomListenerRef.current = null;
+    }
+    setShowRoomModal(false);
+    setRoomPlayers([]);
+    const mId = roomMatchIdRef.current || pendingMatchId;
+    const mCode = roomCodeRef.current || roomCode;
+    roomMatchIdRef.current = null;
+    roomCodeRef.current = null;
+    try {
+      if (mId) {
+        const matchRef = ref(db, `matches/${mId}`);
+        const codeRef = ref(db, `room_codes/${mCode}`);
+        await onDisconnect(matchRef).cancel();
+        if (mCode) await onDisconnect(codeRef).cancel();
+        await remove(matchRef);
+        if (mCode) await remove(codeRef);
+      }
+    } catch (err) {
+      console.error('Cancel room error:', err);
+    }
+    setPendingMatchId(null);
+    setRoomCode(null);
+    setMatchData(null);
+  };
+
+  const startGame = async () => {
+    if (roomListenerRef.current) {
+      roomListenerRef.current();
+      roomListenerRef.current = null;
+    }
+    const mId = roomMatchIdRef.current || pendingMatchId;
+    const mCode = roomCodeRef.current || roomCode;
+    roomMatchIdRef.current = null;
+    roomCodeRef.current = null;
+    try {
+      await update(ref(db, `matches/${mId}`), {
+        state: 'PICKING_LETTERS',
+        player1Score: 0,
+        player2Score: 0,
+        player1Role: 'START',
+        player2Role: 'END',
+        currentRound: 1,
+        minWordLength: roomSettings.minWordLength,
+        winTarget: roomSettings.winTarget,
+        letterMode: letterMode
+      });
+      // Clean up room code index now that the game has started
+      if (mCode) await remove(ref(db, `room_codes/${mCode}`)).catch(() => {});
+      setShowRoomModal(false);
+      setRoomPlayers([]);
+      setMatchId(mId);
+    } catch (err) {
+      console.error('Start game error:', err);
+    }
+  };
+
+  const joinByCode = async () => {
+    const code = joinCodeInput.trim().toUpperCase();
+    if (!code) return;
+    setJoining(true);
+    setJoinError(null);
+    try {
+      const codeSnap = await get(ref(db, `room_codes/${code}`));
+      if (!codeSnap.exists()) {
+        setJoinError('Room not found. Check the code and try again.');
+        return;
+      }
+      const matchId = codeSnap.val();
+      const matchRef = ref(db, `matches/${matchId}`);
+      const matchSnap = await get(matchRef);
+      if (!matchSnap.exists() || matchSnap.val().state !== 'WAITING') {
+        setJoinError('This room is no longer available.');
+        return;
+      }
+      // Join as P2 — wait for host to start (ROOM_SETUP)
+      await update(matchRef, { player2: user.uid, state: 'ROOM_SETUP', player1Score: 0, player2Score: 0, player1GameWins: 0, player2GameWins: 0 });
+      setShowJoinModal(false);
+      setJoinCodeInput('');
+      setPendingMatchId(matchId);
+      initializeRoomListener(matchId);
+      setShowRoomModal(true);
+    } catch (err) {
+      console.error('Join room error:', err);
+      setJoinError('Connection failed. Please try again.');
+    } finally {
+      setJoining(false);
+    }
+  };
+
   // ── Versus: find or create public match ──────────────────────────────────
   const findMatch = async () => {
     setShowSearchModal(true);
     try {
-      const lobbyRef = ref(db, 'lobby/waiting');
+      const lobbyRef = ref(db, 'lobby/public_waiting/versus');
       const newMatchId = `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       let transactionResult = { action: null, matchId: null };
 
@@ -105,14 +281,17 @@ export default function Lobby({ user, profile, setMatchId }) {
         }
         await update(matchRef, {
           player2: user.uid,
-          state: 'SETUP_LENGTH',
+          state: 'ROOM_SETUP',
           player1Score: 0,
           player2Score: 0,
           player1GameWins: 0,
           player2GameWins: 0,
         });
         setShowSearchModal(false);
-        setMatchId(transactionResult.matchId);
+        setPendingMatchId(transactionResult.matchId);
+        initializeRoomListener(transactionResult.matchId);
+        setRoomTab('room');
+        setShowRoomModal(true);
       } else {
         // Created slot — wait for P2 (modal already open)
         const matchRef = ref(db, `matches/${newMatchId}`);
@@ -120,21 +299,17 @@ export default function Lobby({ user, profile, setMatchId }) {
           id: newMatchId,
           player1: user.uid,
           state: 'WAITING',
+          isPublic: true,
           player1GameWins: 0,
           player2GameWins: 0,
+          minWordLength: roomSettings.minWordLength,
+          winTarget: roomSettings.winTarget,
+          letterMode: letterMode
         });
         onDisconnect(lobbyRef).set(null);
         onDisconnect(matchRef).remove();
         setPendingMatchId(newMatchId);
-        const unsub = onValue(matchRef, (snap) => {
-          if (snap.val()?.state === 'SETUP_LENGTH') {
-            unsub();
-            searchListenerRef.current = null;
-            setShowSearchModal(false);
-            setMatchId(newMatchId);
-          }
-        });
-        searchListenerRef.current = unsub;
+        initializeRoomListener(newMatchId);
       }
     } catch (err) {
       console.error('Find match error:', err);
@@ -153,7 +328,7 @@ export default function Lobby({ user, profile, setMatchId }) {
     try {
       if (pendingMatchId) {
         await remove(ref(db, `matches/${pendingMatchId}`));
-        await remove(ref(db, 'lobby/waiting'));
+        await remove(ref(db, 'lobby/public_waiting/versus'));
       }
     } catch (err) {
       console.error('Cancel search error:', err);
@@ -170,35 +345,32 @@ export default function Lobby({ user, profile, setMatchId }) {
     roomCodeRef.current = code;
     setRoomCode(code);
     setRoomPlayers([{ uid: user.uid, username: profile?.username || 'You', isHost: true }]);
+    setRoomTab('room');
+    
+    const initialData = {
+      id: matchId,
+      player1: user.uid,
+      state: 'WAITING',
+      isPublic: false,
+      player1GameWins: 0,
+      player2GameWins: 0,
+      roomCode: code,
+      minWordLength: roomSettings.minWordLength,
+      winTarget: roomSettings.winTarget,
+      letterMode: letterMode
+    };
+    
+    setMatchData(initialData);
     setShowRoomModal(true);
     try {
       const matchRef = ref(db, `matches/${matchId}`);
       const codeRef = ref(db, `room_codes/${code}`);
-      await set(matchRef, { id: matchId, player1: user.uid, state: 'WAITING', player1GameWins: 0, player2GameWins: 0, roomCode: code });
+      await set(matchRef, initialData);
       await set(codeRef, matchId);
       onDisconnect(matchRef).remove();
       onDisconnect(codeRef).remove();
       setPendingMatchId(matchId);
-      // Watch for P2 joining/leaving
-      let p2Fetched = false;
-      const unsub = onValue(matchRef, async (snap) => {
-        const data = snap.val();
-        if (!data) return;
-        if (data.player2 && !p2Fetched) {
-          p2Fetched = true;
-          let p2Username = 'Player 2';
-          try {
-            const p2Snap = await getDoc(doc(firestore, 'users', data.player2));
-            if (p2Snap.exists()) p2Username = p2Snap.data().username;
-          } catch { /* use fallback */ }
-          setRoomPlayers(prev => [...prev, { uid: data.player2, username: p2Username, isHost: false }]);
-        }
-        if (!data.player2 && p2Fetched) {
-          p2Fetched = false;
-          setRoomPlayers(prev => prev.filter(p => p.isHost));
-        }
-      });
-      roomListenerRef.current = unsub;
+      initializeRoomListener(matchId);
     } catch (err) {
       console.error('Create room error:', err);
       setShowRoomModal(false);
@@ -211,179 +383,23 @@ export default function Lobby({ user, profile, setMatchId }) {
     }
   };
 
-  const cancelRoom = async () => {
-    if (roomListenerRef.current) {
-      roomListenerRef.current();
-      roomListenerRef.current = null;
-    }
-    setShowRoomModal(false);
-    setRoomPlayers([]);
-    const mId = roomMatchIdRef.current || pendingMatchId;
-    const mCode = roomCodeRef.current || roomCode;
-    roomMatchIdRef.current = null;
-    roomCodeRef.current = null;
-    try {
-      if (mId) {
-        const matchRef = ref(db, `matches/${mId}`);
-        const codeRef = ref(db, `room_codes/${mCode}`);
-        await onDisconnect(matchRef).cancel();
-        await onDisconnect(codeRef).cancel();
-        await remove(matchRef);
-        await remove(codeRef);
-      }
-    } catch (err) {
-      console.error('Cancel room error:', err);
-    }
-    setPendingMatchId(null);
-    setRoomCode(null);
-  };
-
-  // ── Versus: host starts the game ─────────────────────────────────────────
-  const startGame = async () => {
-    if (roomListenerRef.current) {
-      roomListenerRef.current();
-      roomListenerRef.current = null;
-    }
-    const mId = roomMatchIdRef.current || pendingMatchId;
-    const mCode = roomCodeRef.current || roomCode;
-    roomMatchIdRef.current = null;
-    roomCodeRef.current = null;
-    try {
-      await update(ref(db, `matches/${mId}`), {
-        state: 'SETUP_LENGTH',
-        player1Score: 0,
-        player2Score: 0,
-      });
-      // Clean up room code index now that the game has started
-      await remove(ref(db, `room_codes/${mCode}`)).catch(() => {});
-      setShowRoomModal(false);
-      setRoomPlayers([]);
-      setMatchId(mId);
-    } catch (err) {
-      console.error('Start game error:', err);
-    }
-  };
-
-  // ── Versus: join by code ──────────────────────────────────────────────────
-  const joinByCode = async () => {
-    const code = joinCodeInput.trim().toUpperCase();
-    if (!code) return;
-    setJoining(true);
-    setJoinError(null);
-    try {
-      const codeSnap = await get(ref(db, `room_codes/${code}`));
-      if (!codeSnap.exists()) {
-        setJoinError('Room not found. Check the code and try again.');
-        return;
-      }
-      const matchId = codeSnap.val();
-      const matchRef = ref(db, `matches/${matchId}`);
-      const matchSnap = await get(matchRef);
-      if (!matchSnap.exists() || matchSnap.val().state !== 'WAITING') {
-        setJoinError('This room is no longer available.');
-        return;
-      }
-      // Join as P2 — wait for host to start (ROOM_READY, not SETUP_LENGTH yet)
-      await update(matchRef, { player2: user.uid, state: 'ROOM_READY', player1Score: 0, player2Score: 0, player1GameWins: 0, player2GameWins: 0 });
-      setShowJoinModal(false);
-      setJoinCodeInput('');
-      setWaitingMatchId(matchId);
-      setShowWaitingModal(true);
-      const unsub = onValue(matchRef, (snap) => {
-        const data = snap.val();
-        if (!data) {
-          // Host deleted the room
-          unsub();
-          waitingListenerRef.current = null;
-          setShowWaitingModal(false);
-          setWaitingMatchId(null);
-          return;
-        }
-        if (data.state === 'SETUP_LENGTH') {
-          unsub();
-          waitingListenerRef.current = null;
-          setShowWaitingModal(false);
-          setWaitingMatchId(null);
-          setMatchId(matchId);
-        }
-      });
-      waitingListenerRef.current = unsub;
-    } catch (err) {
-      console.error('Join room error:', err);
-      setJoinError('Connection failed. Please try again.');
-    } finally {
-      setJoining(false);
-    }
-  };
-
-  const leaveWaitingRoom = async () => {
-    if (waitingListenerRef.current) {
-      waitingListenerRef.current();
-      waitingListenerRef.current = null;
-    }
-    setShowWaitingModal(false);
-    try {
-      if (waitingMatchId) {
-        await update(ref(db, `matches/${waitingMatchId}`), { player2: null, state: 'WAITING' });
-      }
-    } catch (err) {
-      console.error('Leave room error:', err);
-    }
-    setWaitingMatchId(null);
-  };
-
   const toggleLanguage = () => setLanguage(l => l === 'en' ? 'zh-TW' : 'en');
 
-  // ── Reusable Letter Selection control ────────────────────────────────────
-  const LetterSelection = ({ disabled = false }) => {
-    const activeMode = disabled ? 'system' : letterMode;
-    return (
-      <div className="letter-selection-row">
-        <span className="letter-selection-label">Letter Selection</span>
-        <div className="segmented-control">
-          <button
-            className={`segment ${activeMode === 'system' ? 'segment-active' : ''}`}
-            onClick={() => !disabled && setLetterMode('system')}
-            disabled={disabled}
-          >
-            System
-          </button>
-          {!disabled && (
-            <button
-              className={`segment ${activeMode === 'players' ? 'segment-active' : ''}`}
-              onClick={() => setLetterMode('players')}
-            >
-              Players
-            </button>
-          )}
-          {disabled && (
-            <button className="segment" disabled style={{ opacity: 0.3 }}>
-              Players
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  };
 
   // ── Action panel per mode ─────────────────────────────────────────────────
   const renderActionPanel = () => {
     if (mode === 'solo') {
       return (
         <div className="action-panel">
-          <LetterSelection disabled />
           <button className="primary" style={{ width: '100%', marginBottom: '0.75rem' }} disabled>
             Start Practice
-            <span style={{ fontSize: '0.75rem', display: 'block', opacity: 0.6 }}>Coming soon</span>
           </button>
           <div style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
             <button style={{ flex: 1 }} disabled>
               Leaderboard
-              <span style={{ fontSize: '0.75rem', display: 'block', opacity: 0.6 }}>Coming soon</span>
             </button>
             <button style={{ flex: 1 }} disabled>
               Best Streak
-              <span style={{ fontSize: '0.75rem', display: 'block', opacity: 0.6 }}>Coming soon</span>
             </button>
           </div>
         </div>
@@ -393,19 +409,15 @@ export default function Lobby({ user, profile, setMatchId }) {
     if (mode === 'party') {
       return (
         <div className="action-panel">
-          <LetterSelection />
           <button className="primary" style={{ width: '100%', marginBottom: '0.75rem' }} disabled>
             Quick Match
-            <span style={{ fontSize: '0.75rem', display: 'block', opacity: 0.6 }}>Coming soon</span>
           </button>
           <div style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
             <button style={{ flex: 1 }} disabled>
               Create Room
-              <span style={{ fontSize: '0.75rem', display: 'block', opacity: 0.6 }}>Coming soon</span>
             </button>
             <button style={{ flex: 1 }} disabled>
               Join by Code
-              <span style={{ fontSize: '0.75rem', display: 'block', opacity: 0.6 }}>Coming soon</span>
             </button>
           </div>
         </div>
@@ -413,10 +425,9 @@ export default function Lobby({ user, profile, setMatchId }) {
     }
 
     // Versus (default)
-    const anyModalOpen = showSearchModal || showRoomModal;
+    const anyModalOpen = showSearchModal || showRoomModal || showJoinModal;
     return (
       <div className="action-panel">
-        <LetterSelection />
         {status === 'error' && (
           <div className="error-message" style={{ marginBottom: '1rem' }}>
             Connection failed. Please try again.
@@ -433,11 +444,9 @@ export default function Lobby({ user, profile, setMatchId }) {
         <div style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
           <button style={{ flex: 1, padding: '0.75rem 0.5rem' }} onClick={createRoom} disabled={anyModalOpen}>
             Create Room
-            <span style={{ fontSize: '0.7rem', display: 'block', opacity: 0.5, fontWeight: 400, marginTop: '2px' }}>Coming soon</span>
           </button>
           <button style={{ flex: 1, padding: '0.75rem 0.5rem' }} onClick={() => setShowJoinModal(true)} disabled={anyModalOpen}>
             Join by Code
-            <span style={{ fontSize: '0.7rem', display: 'block', opacity: 0.5, fontWeight: 400, marginTop: '2px' }}>Coming soon</span>
           </button>
         </div>
       </div>
@@ -617,81 +626,152 @@ export default function Lobby({ user, profile, setMatchId }) {
         </div>
       )}
 
-      {/* Room Modal */}
-      {showRoomModal && (
+      {showRoomModal && matchData && (
         <div className="popup-overlay">
-          <div className="rules-modal" onClick={e => e.stopPropagation()}>
-            <h2 style={{ color: 'var(--glow-color)', marginBottom: '0.5rem', marginTop: 0, fontSize: '1.75rem' }}>
-              Private Room
+          <div className="rules-modal" onClick={e => e.stopPropagation()} style={{ maxHeight: '90dvh', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ overflowY: 'auto', flex: 1 }}>
+            <h2 style={{ color: 'var(--glow-color)', marginBottom: '1.25rem', marginTop: 0, fontSize: '1.75rem', textAlign: 'center' }}>
+              Game Room
             </h2>
 
-            {/* Room code */}
-            <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
-              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: '0.4rem', fontWeight: 800 }}>Room Code</div>
-              <div className="room-code-display">{roomCode}</div>
-              <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>Share this code with a friend</div>
+            <div className="tags-row" style={{ marginBottom: '1.25rem' }}>
+              <span className="badge-tag badge-versus">Versus Mode</span>
+              <span className={`badge-tag ${matchData.isPublic ? 'badge-public' : 'badge-private'}`}>
+                {matchData.isPublic ? 'Public' : 'Private'}
+              </span>
             </div>
 
-            {/* Player slots */}
-            <div style={{ marginBottom: '2rem' }}>
-              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 800, marginBottom: '1rem' }}>
-                Players — Versus (2 max)
-              </div>
+            {/* Tab bar */}
+            <div className="game-tabs" style={{ marginBottom: '1.25rem' }}>
+              <button
+                className={`game-tab${roomTab === 'room' ? ' game-tab-active' : ''}`}
+                onClick={() => setRoomTab('room')}
+              >Room</button>
+              <button
+                className={`game-tab${roomTab === 'setup' ? ' game-tab-active' : ''}`}
+                onClick={() => setRoomTab('setup')}
+              >Setup</button>
+            </div>
 
-              {/* Slot 1 — Host */}
-              <div className="room-player-slot filled">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)' }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                <span className="room-player-name">{roomPlayers[0]?.username}</span>
-                <span className="room-player-badge">Host</span>
-              </div>
+            {/* Room tab */}
+            {roomTab === 'room' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
+                {/* Players with count */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <label className="settings-label" style={{ marginBottom: 0 }}>Players</label>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--glow-color)' }}>{roomPlayers.length}/2</span>
+                </div>
+                <div className="room-player-slot filled">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                  <span className="room-player-name">{roomPlayers[0]?.username || 'Host'}</span>
+                  <span className="room-player-badge">Host</span>
+                </div>
+                <div className={`room-player-slot ${roomPlayers[1] ? 'filled' : 'waiting'}`}>
+                  {roomPlayers[1] ? (
+                    <>
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                      <span className="room-player-name">{roomPlayers[1].username}</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="spinner" style={{ width: '1.2rem', height: '1.2rem', opacity: 0.5, flexShrink: 0 }} />
+                      <span className="room-player-name" style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontWeight: 500 }}>Waiting...</span>
+                    </>
+                  )}
+                </div>
 
-              {/* Slot 2 — Opponent */}
-              <div className={`room-player-slot ${roomPlayers[1] ? 'filled' : 'waiting'}`}>
-                {roomPlayers[1] ? (
-                  <>
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)' }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                    <span className="room-player-name">{roomPlayers[1].username}</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="spinner" style={{ width: '1.2rem', height: '1.2rem', opacity: 0.5 }} />
-                    <span className="room-player-name" style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontWeight: 500 }}>Waiting for opponent...</span>
-                  </>
+                {/* Room Code — below players */}
+                {!matchData.isPublic && matchData.roomCode && (
+                  <div
+                    className="room-code-section copyable"
+                    onClick={copyRoomCode}
+                    style={{ marginTop: '0.25rem' }}
+                  >
+                    <div className="label">Room Code</div>
+                    <div className="code">{matchData.roomCode}</div>
+                    <div className={`room-code-hint${copiedCode ? ' copied' : ''}`}>
+                      {copiedCode ? '✓ Copied!' : 'Tap to copy'}
+                    </div>
+                  </div>
                 )}
               </div>
-            </div>
+            )}
 
-            <div style={{ textAlign: 'center', marginBottom: '1.5rem' }}>
-              {roomPlayers.length === 2 ? (
-                <button className="primary" style={{ width: '100%' }} onClick={startGame}>
+            {/* Setup tab */}
+            {roomTab === 'setup' && (
+              <div style={{ marginBottom: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                <div className="settings-group" style={{ marginBottom: 0 }}>
+                  <label className="settings-label">Letter Selection</label>
+                  <div className="segmented-control" style={{ width: '100%' }}>
+                    <button
+                      className={`segment ${matchData.letterMode === 'system' ? 'segment-active' : ''}`}
+                      onClick={() => updateRoomSetting('letterMode', 'system')}
+                      disabled={user.uid !== matchData.player1}
+                      style={{ flex: 1 }}
+                    >System</button>
+                    <button
+                      className={`segment ${matchData.letterMode === 'players' ? 'segment-active' : ''}`}
+                      onClick={() => updateRoomSetting('letterMode', 'players')}
+                      disabled={user.uid !== matchData.player1}
+                      style={{ flex: 1 }}
+                    >Players</button>
+                  </div>
+                </div>
+
+                <div className="settings-group" style={{ marginBottom: 0 }}>
+                  <label className="settings-label">Min Length: <span style={{ color: 'var(--glow-color)', float: 'right' }}>{matchData.minWordLength || 3}</span></label>
+                  <input
+                    type="range"
+                    min="3"
+                    max="10"
+                    value={matchData.minWordLength || 3}
+                    onChange={(e) => updateRoomSetting('minWordLength', parseInt(e.target.value))}
+                    disabled={user.uid !== matchData.player1}
+                    style={{ width: '100%', height: '10px', background: 'rgba(255,255,255,0.1)', borderRadius: '5px', accentColor: 'var(--glow-color)' }}
+                  />
+                </div>
+
+                <div className="settings-group" style={{ marginBottom: 0 }}>
+                  <label className="settings-label">Target Points</label>
+                  <div className="segmented-control" style={{ width: '100%' }}>
+                    {[5, 10, 20].map(n => (
+                      <button
+                        key={n}
+                        className={`segment ${matchData.winTarget === n ? 'segment-active' : ''}`}
+                        onClick={() => updateRoomSetting('winTarget', n)}
+                        disabled={user.uid !== matchData.player1}
+                        style={{ flex: 1 }}
+                      >{n}</button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            </div>{/* end scrollable */}
+            <div style={{ display: 'flex', gap: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--glass-border)', flexShrink: 0 }}>
+              <button className="secondary" style={{ flex: 1, padding: '1rem' }} onClick={cancelRoom}>
+                Leave Room
+              </button>
+              {user.uid === matchData.player1 ? (
+                <button
+                  className="primary"
+                  style={{ flex: 1.5, padding: '1rem' }}
+                  onClick={startGame}
+                  disabled={roomPlayers.length < 2}
+                >
                   Start Game
                 </button>
               ) : (
-                <div style={{ fontSize: '0.9rem', color: 'var(--text-muted)', fontWeight: 500 }}>
-                  Waiting for a player to join...
+                <div style={{ flex: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(56, 189, 248, 0.05)', border: '1px solid rgba(56, 189, 248, 0.15)', borderRadius: '12px', color: 'var(--text-muted)', fontWeight: 600, fontSize: '0.85rem', padding: '0.5rem', textAlign: 'center' }}>
+                  Waiting for host to begin...
                 </div>
               )}
             </div>
-            <button style={{ width: '100%', padding: '1rem' }} onClick={cancelRoom}>Exit Room</button>
           </div>
         </div>
       )}
 
-      {/* P2 Waiting Modal */}
-      {showWaitingModal && (
-        <div className="popup-overlay">
-          <div className="rules-modal" style={{ textAlign: 'center' }} onClick={e => e.stopPropagation()}>
-            <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1.25rem' }}>
-              <span className="spinner" style={{ width: '2rem', height: '2rem', borderWidth: '3px' }} />
-            </div>
-            <h2 style={{ color: 'var(--glow-color)', marginTop: 0, marginBottom: '0.5rem' }}>Room Joined</h2>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem', marginBottom: '1.75rem' }}>
-              Waiting for the host to start the game...
-            </p>
-            <button style={{ width: '100%' }} onClick={leaveWaitingRoom}>Leave Room</button>
-          </div>
-        </div>
-      )}
 
       {/* Join by Code Modal */}
       {showJoinModal && (
