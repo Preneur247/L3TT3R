@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { ref, get, set, update, onDisconnect, onValue, runTransaction, remove } from 'firebase/database';
 import { doc, getDoc } from 'firebase/firestore';
 import { db, firestore } from '../firebase';
@@ -20,32 +20,12 @@ const MODES = [
 ];
 
 const RULES = {
-  solo: [
-    'Timed mode to test your speed and vocabulary.',
-    'Form a valid English word that starts and ends with the given letters.',
-    'Race against the clock to submit as many words as possible.',
-    'The winning word is translated to Chinese after each round. 🎉',
-  ],
-  versus: [
-    'Form a valid English word that starts and ends with the given letters.',
-    'The word must meet the minimum length set before the match.',
-    'First to submit a correct word wins the round.',
-    'Both players passing triggers a draw for that round.',
-    'Timer runs out at 99s — also a draw.',
-    'First to reach the point target wins the game!',
-    'The winning word is translated to Chinese after each round. 🎉',
-  ],
-  party: [
-    'Play with multiple friends in a single room.',
-    'Host customized matches with private share codes.',
-    'Form a valid English word that starts and ends with the given letters.',
-    'First to submit a correct word wins the round.',
-    'First to reach the point target wins the game!',
-    'The winning word is translated to Chinese after each round. 🎉',
-  ],
+  solo: 'Coming Soon',
+  versus: 'VISUAL',
+  party: 'Coming Soon',
 };
 
-export default function Lobby({ user, profile, setMatchId }) {
+export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
   const [mode, setMode] = useState('versus');
   const [letterMode, setLetterMode] = useState('players'); // 'system' | 'players'
   const [status, setStatus] = useState('idle');           // idle | searching | error
@@ -73,6 +53,21 @@ export default function Lobby({ user, profile, setMatchId }) {
   const [showLinkModal, setShowLinkModal] = useState(false);
   const [tutorialMode, setTutorialMode] = useState('versus');
   const [language, setLanguage] = useState('en');         // 'en' | 'zh-TW'
+
+  // ── Restore room after Back to Room from game over ───────────────────────
+  useEffect(() => {
+    if (!initialMatchId) return;
+    setPendingMatchId(initialMatchId);
+    roomMatchIdRef.current = initialMatchId;
+    get(ref(db, `matches/${initialMatchId}`)).then(snap => {
+      const data = snap.val();
+      if (data?.roomCode) {
+        setRoomCode(data.roomCode);
+        roomCodeRef.current = data.roomCode;
+      }
+    });
+    initializeRoomListener(initialMatchId);
+  }, [initialMatchId]);
 
   // ── Utility Room Functions ───────────────────────────────────────────────
   const initializeRoomListener = (mId) => {
@@ -462,6 +457,32 @@ export default function Lobby({ user, profile, setMatchId }) {
 
   return (
     <>
+      <style>{`
+        .custom-range::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 22px;
+          height: 22px;
+          background: #fff;
+          border: 3px solid var(--glow-color);
+          border-radius: 50%;
+          cursor: pointer;
+          box-shadow: 0 0 10px rgba(0,0,0,0.5);
+          position: relative;
+          z-index: 10;
+        }
+        .custom-range::-moz-range-thumb {
+          width: 22px;
+          height: 22px;
+          background: #fff;
+          border: 3px solid var(--glow-color);
+          border-radius: 50%;
+          cursor: pointer;
+          box-shadow: 0 0 10px rgba(0,0,0,0.5);
+          position: relative;
+          z-index: 10;
+        }
+      `}</style>
       {/* Stats Modal */}
       {showStats && (
         <div className="popup-overlay" onClick={() => setShowStats(false)}>
@@ -605,9 +626,52 @@ export default function Lobby({ user, profile, setMatchId }) {
                 </button>
               ))}
             </div>
-            <ul>
-              {RULES[tutorialMode].map((rule, i) => <li key={i}>{rule}</li>)}
-            </ul>
+            {tutorialMode === 'versus' ? (
+              <div className="tutorial-visual" style={{ padding: '0.5rem 0' }}>
+                <div style={{ marginBottom: '2rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+                    <div style={{ width: '42px', height: '42px', border: '2px solid var(--glow-color)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem', color: 'var(--glow-color)', background: 'rgba(56, 189, 248, 0.05)' }}>S</div>
+                    <div style={{ width: '42px', height: '42px', border: '2px dashed rgba(255,255,255,0.15)', borderRadius: '10px' }}></div>
+                    <div style={{ width: '42px', height: '42px', border: '2px dashed rgba(255,255,255,0.15)', borderRadius: '10px' }}></div>
+                    <div style={{ width: '42px', height: '42px', border: '2px dashed rgba(255,255,255,0.15)', borderRadius: '10px' }}></div>
+                    <div style={{ width: '42px', height: '42px', border: '2px solid var(--glow-color)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem', color: 'var(--glow-color)', background: 'rgba(56, 189, 248, 0.05)' }}>T</div>
+                  </div>
+                  <p style={{ textAlign: 'center', fontSize: '1rem', color: 'var(--text-main)', fontWeight: 700, marginBottom: '0.25rem' }}>1. Start & End Letters</p>
+                  <p style={{ textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>Form a word that begins and ends with the letters shown on screen.</p>
+                </div>
+
+                <div style={{ marginBottom: '2rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+                    <div style={{ width: '42px', height: '42px', background: 'rgba(255,255,255,0.08)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem' }}>S</div>
+                    <div style={{ width: '42px', height: '42px', background: 'var(--glow-color)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem', color: '#000', boxShadow: '0 0 15px var(--glow-color)' }}>M</div>
+                    <div style={{ width: '42px', height: '42px', background: 'var(--glow-color)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem', color: '#000', boxShadow: '0 0 15px var(--glow-color)' }}>A</div>
+                    <div style={{ width: '42px', height: '42px', background: 'var(--glow-color)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem', color: '#000', boxShadow: '0 0 15px var(--glow-color)' }}>R</div>
+                    <div style={{ width: '42px', height: '42px', background: 'rgba(255,255,255,0.08)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem' }}>T</div>
+                  </div>
+                  <p style={{ textAlign: 'center', fontSize: '1rem', color: 'var(--text-main)', fontWeight: 700, marginBottom: '0.25rem' }}>2. Meet the Length</p>
+                  <p style={{ textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>Ensure your word meets the minimum length requirement for the round.</p>
+                </div>
+
+                <div style={{ background: 'rgba(56, 189, 248, 0.08)', padding: '1.25rem', borderRadius: '16px', border: '1px solid rgba(56, 189, 248, 0.2)', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>🏆</div>
+                  <p style={{ fontSize: '1rem', color: 'var(--glow-color)', fontWeight: 800, marginBottom: '0.25rem' }}>3. Race to Submit</p>
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>Be the first to submit a valid word! Reach the target score to win the match.</p>
+                </div>
+              </div>
+            ) : (
+              <div style={{ 
+                textAlign: 'center', 
+                fontSize: '2.5rem', 
+                fontWeight: 800, 
+                margin: '4rem 0', 
+                color: 'var(--text-muted)',
+                letterSpacing: '0.05em',
+                textTransform: 'uppercase',
+                opacity: 0.5
+              }}>
+                {RULES[tutorialMode]}
+              </div>
+            )}
             <div style={{ textAlign: 'center' }}>
               <button className="primary" onClick={() => setShowRules(false)}>Close</button>
             </div>
@@ -616,7 +680,7 @@ export default function Lobby({ user, profile, setMatchId }) {
       )}
 
       {/* Link Account Modal */}
-      {showLinkModal && <LinkAccount onClose={() => setShowLinkModal(false)} />}
+      {showLinkModal && <LinkAccount onClose={() => setShowLinkModal(false)} username={profile?.username} />}
 
       {/* Quick Match Search Modal */}
       {showSearchModal && (
@@ -650,58 +714,108 @@ export default function Lobby({ user, profile, setMatchId }) {
               </div>
 
               {/* Tab bar */}
-              <div className="game-tabs" style={{ marginBottom: '1.25rem' }}>
+              <div className="game-tabs" style={{ marginBottom: '1.25rem', width: '100%' }}>
                 <button
                   className={`game-tab${roomTab === 'room' ? ' game-tab-active' : ''}`}
                   onClick={() => setRoomTab('room')}
+                  style={{ flex: 1 }}
                 >Room</button>
+                {!matchData.isPublic && (
+                  <button
+                    className={`game-tab${roomTab === 'invite' ? ' game-tab-active' : ''}`}
+                    onClick={() => setRoomTab('invite')}
+                    style={{ flex: 1 }}
+                  >Invite</button>
+                )}
                 <button
                   className={`game-tab${roomTab === 'setup' ? ' game-tab-active' : ''}`}
                   onClick={() => setRoomTab('setup')}
+                  style={{ flex: 1 }}
                 >Setup</button>
               </div>
 
               {/* Room tab */}
-              {roomTab === 'room' && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
-                  {/* Players with count */}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <label className="settings-label" style={{ marginBottom: 0 }}>Players</label>
-                    <span style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--glow-color)' }}>{roomPlayers.length}/2</span>
-                  </div>
-                  <div className="room-player-slot filled">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                    <span className="room-player-name">{roomPlayers[0]?.username || 'Host'}</span>
-                    <span className="room-player-badge">Host</span>
-                  </div>
-                  <div className={`room-player-slot ${roomPlayers[1] ? 'filled' : 'waiting'}`}>
-                    {roomPlayers[1] ? (
-                      <>
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                        <span className="room-player-name">{roomPlayers[1].username}</span>
-                      </>
-                    ) : (
-                      <>
-                        <span className="spinner" style={{ width: '1.2rem', height: '1.2rem', opacity: 0.5, flexShrink: 0 }} />
-                        <span className="room-player-name" style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontWeight: 500 }}>Waiting...</span>
-                      </>
+              {roomTab === 'room' && (() => {
+                const gameWinsByUid = {
+                  [matchData.player1]: matchData.player1GameWins || 0,
+                  ...(matchData.player2 ? { [matchData.player2]: matchData.player2GameWins || 0 } : {}),
+                };
+                const totalGameWins = Object.values(gameWinsByUid).reduce((s, v) => s + v, 0);
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
+                    {/* Players with count */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <label className="settings-label" style={{ marginBottom: 0 }}>Players</label>
+                      <span style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--glow-color)' }}>{roomPlayers.length}/2</span>
+                    </div>
+                    <div className="room-player-slot filled">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                      <span className="room-player-name">{roomPlayers[0]?.username || 'Host'}</span>
+                      <span className="room-player-badge">Host</span>
+                    </div>
+                    <div className={`room-player-slot ${roomPlayers[1] ? 'filled' : 'waiting'}`}>
+                      {roomPlayers[1] ? (
+                        <>
+                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                          <span className="room-player-name">{roomPlayers[1].username}</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="spinner" style={{ width: '1.2rem', height: '1.2rem', opacity: 0.5, flexShrink: 0 }} />
+                          <span className="room-player-name" style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontWeight: 500 }}>Waiting...</span>
+                        </>
+                      )}
+                    </div>
+
+                    {/* Series record — shown when at least one game has been played */}
+                    {totalGameWins > 0 && (
+                      <div className="room-series">
+                        <div className="room-series-label">Series</div>
+                        {roomPlayers.length === 2 ? (
+                          /* Versus layout: NAME  W – W  NAME */
+                          <div className="room-series-versus">
+                            <span className="room-series-name">{roomPlayers[0].username}</span>
+                            <span className="room-series-score">
+                              {gameWinsByUid[roomPlayers[0].uid]}
+                              <span className="room-series-sep">–</span>
+                              {gameWinsByUid[roomPlayers[1].uid]}
+                            </span>
+                            <span className="room-series-name right">{roomPlayers[1].username}</span>
+                          </div>
+                        ) : (
+                          /* Party layout: ranked list */
+                          [...roomPlayers]
+                            .sort((a, b) => (gameWinsByUid[b.uid] || 0) - (gameWinsByUid[a.uid] || 0))
+                            .map((p, i) => (
+                              <div key={p.uid} className="room-series-row">
+                                <span className="room-series-rank">{i + 1}</span>
+                                <span className="room-series-name">{p.username}</span>
+                                <span className="room-series-wins">{gameWinsByUid[p.uid] || 0} W</span>
+                              </div>
+                            ))
+                        )}
+                      </div>
                     )}
                   </div>
+                );
+              })()}
 
-                  {/* Room Code — below players */}
-                  {!matchData.isPublic && matchData.roomCode && (
-                    <div
-                      className="room-code-section copyable"
-                      onClick={copyRoomCode}
-                      style={{ marginTop: '0.25rem' }}
-                    >
-                      <div className="label">Room Code</div>
-                      <div className="code">{matchData.roomCode}</div>
-                      <div className={`room-code-hint${copiedCode ? ' copied' : ''}`}>
-                        {copiedCode ? '✓ Copied!' : 'Tap to copy'}
-                      </div>
+              {/* Invite tab — private rooms only */}
+              {roomTab === 'invite' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem' }}>
+                  <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'center', margin: 0 }}>
+                    Share this code with a friend to invite them to your room.
+                  </p>
+                  <div
+                    className="room-code-section copyable"
+                    onClick={copyRoomCode}
+                  >
+                    <div className="label">Room Code</div>
+                    <div className="code">{matchData.roomCode}</div>
+                    <div className={`room-code-hint${copiedCode ? ' copied' : ''}`}>
+                      {copiedCode ? '✓ Copied!' : 'Tap to copy'}
                     </div>
-                  )}
+                  </div>
                 </div>
               )}
 
@@ -710,15 +824,15 @@ export default function Lobby({ user, profile, setMatchId }) {
                 <div style={{ marginBottom: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
                   <div className="settings-group" style={{ marginBottom: 0 }}>
                     <label className="settings-label">Letter Selection</label>
-                    <div className="segmented-control" style={{ width: '100%' }}>
+                    <div className="game-tabs" style={{ width: '100%', marginBottom: 0 }}>
                       <button
-                        className={`segment ${matchData.letterMode === 'system' ? 'segment-active' : ''}`}
+                        className={`game-tab${matchData.letterMode === 'system' ? ' game-tab-active' : ''}`}
                         onClick={() => updateRoomSetting('letterMode', 'system')}
                         disabled={user.uid !== matchData.player1}
                         style={{ flex: 1 }}
                       >System</button>
                       <button
-                        className={`segment ${matchData.letterMode === 'players' ? 'segment-active' : ''}`}
+                        className={`game-tab${matchData.letterMode === 'players' ? ' game-tab-active' : ''}`}
                         onClick={() => updateRoomSetting('letterMode', 'players')}
                         disabled={user.uid !== matchData.player1}
                         style={{ flex: 1 }}
@@ -727,25 +841,55 @@ export default function Lobby({ user, profile, setMatchId }) {
                   </div>
 
                   <div className="settings-group" style={{ marginBottom: 0 }}>
-                    <label className="settings-label">Min Length: <span style={{ color: 'var(--glow-color)', float: 'right' }}>{matchData.minWordLength || 3}</span></label>
-                    <input
-                      type="range"
-                      min="3"
-                      max="10"
-                      value={matchData.minWordLength || 3}
-                      onChange={(e) => updateRoomSetting('minWordLength', parseInt(e.target.value))}
-                      disabled={user.uid !== matchData.player1}
-                      style={{ width: '100%', height: '10px', background: 'rgba(255,255,255,0.1)', borderRadius: '5px', accentColor: 'var(--glow-color)' }}
-                    />
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                      <label className="settings-label" style={{ marginBottom: 0 }}>Min Length</label>
+                      <div style={{
+                        background: 'var(--glow-color)',
+                        color: '#000',
+                        fontWeight: 800,
+                        fontSize: '1.1rem',
+                        padding: '0.25rem 0.75rem',
+                        borderRadius: '8px',
+                        minWidth: '40px',
+                        textAlign: 'center'
+                      }}>
+                        {matchData.minWordLength || 3}
+                      </div>
+                    </div>
+                    <div style={{ position: 'relative', padding: '0.25rem 0' }}>
+                      <input
+                        type="range"
+                        className="custom-range"
+                        min="3"
+                        max="10"
+                        value={matchData.minWordLength || 3}
+                        onChange={(e) => updateRoomSetting('minWordLength', parseInt(e.target.value))}
+                        disabled={user.uid !== matchData.player1}
+                        style={{
+                          width: '100%',
+                          height: '16px',
+                          background: `linear-gradient(to right, var(--glow-color) ${((matchData.minWordLength || 3) - 3) / 7 * 100}%, rgba(255,255,255,0.15) ${((matchData.minWordLength || 3) - 3) / 7 * 100}%)`,
+                          borderRadius: '8px',
+                          accentColor: 'transparent',
+                          cursor: user.uid !== matchData.player1 ? 'not-allowed' : 'pointer',
+                          appearance: 'none',
+                          WebkitAppearance: 'none'
+                        }}
+                      />
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.5rem' }}>
+                        <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>3</span>
+                        <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>10</span>
+                      </div>
+                    </div>
                   </div>
 
                   <div className="settings-group" style={{ marginBottom: 0 }}>
                     <label className="settings-label">Target Points</label>
-                    <div className="segmented-control" style={{ width: '100%' }}>
+                    <div className="game-tabs" style={{ width: '100%', marginBottom: 0 }}>
                       {[5, 10, 20].map(n => (
                         <button
                           key={n}
-                          className={`segment ${matchData.winTarget === n ? 'segment-active' : ''}`}
+                          className={`game-tab${(matchData.winTarget || 5) === n ? ' game-tab-active' : ''}`}
                           onClick={() => updateRoomSetting('winTarget', n)}
                           disabled={user.uid !== matchData.player1}
                           style={{ flex: 1 }}

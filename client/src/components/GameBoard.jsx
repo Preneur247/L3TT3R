@@ -303,10 +303,12 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
       <div className="scoreboard">
         <div className="score-item">
           <span className="label">{profile?.username || 'You'}</span>
+          <span className={`pass-badge${matchData.state === 'GUESSING' && (isP1 ? matchData.player1Pass : matchData.player2Pass) ? '' : ' pass-badge--hidden'}`}>PASSED</span>
           <span className="value">{myScore}</span>
         </div>
         <div className="score-item">
           <span className="label">{oppUsername}</span>
+          <span className={`pass-badge${matchData.state === 'GUESSING' && (!isP1 ? matchData.player1Pass : matchData.player2Pass) ? '' : ' pass-badge--hidden'}`}>PASSED</span>
           <span className="value">{oppScore}</span>
         </div>
       </div>
@@ -347,6 +349,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
                 {/* Keep input mounted even while waiting so keyboard stays open.
                     Hidden via opacity/height when locked; autoFocus opens keyboard. */}
                 <form
+                  className="pick-letter-form"
                   onSubmit={e => { e.preventDefault(); submitPick(); }}
                   style={{
                     overflow: 'hidden',
@@ -356,6 +359,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
                   }}
                 >
                   <input
+                    className="pick-letter-input"
                     type="text"
                     maxLength="1"
                     value={letter}
@@ -363,9 +367,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
                     style={{ textTransform: 'uppercase' }}
                     autoFocus
                   />
-                  <div className="controls">
-                    <button className="primary" type="submit">Lock</button>
-                  </div>
+                  <button className="primary" type="submit">Lock</button>
                 </form>
               </>
             )}
@@ -386,7 +388,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
               />
               <div className="controls">
                 <button className="primary" type="submit">Submit</button>
-                <button type="button" onClick={handlePass}>Pass</button>
+                <button className={isP1 && matchData.player1Pass || !isP1 && matchData.player2Pass ? 'selected' : ''} type="button" onClick={handlePass}>Pass</button>
               </div>
             </form>
           </>

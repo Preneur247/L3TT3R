@@ -200,7 +200,7 @@ function App() {
         {gameState !== 'LOBBY' && <h1>L3TT3R</h1>}
 
         {gameState === 'LOBBY' && (
-          <Lobby user={user} profile={profile} setMatchId={setCurrentMatchId} />
+          <Lobby user={user} profile={profile} setMatchId={setCurrentMatchId} initialMatchId={currentMatchId} />
         )}
 
         {gameState === 'PLAYING' && matchData && (
@@ -219,28 +219,36 @@ function App() {
         const lastWord = matchData.lastRoundResult?.word;
         const lastTranslation = matchData.lastRoundResult?.translation;
 
+        const resetMatchState = {
+          state: 'ROOM_SETUP',
+          winner: null,
+          gameOverReason: null,
+          player1Score: 0,
+          player2Score: 0,
+          player1Letter: null,
+          player2Letter: null,
+          player1Pass: null,
+          player2Pass: null,
+          player1Role: null,
+          player2Role: null,
+          startLetter: null,
+          endLetter: null,
+          roundStartTime: null,
+          currentRound: null,
+          lastRoundResult: null,
+          minWordLength: null,
+          winTarget: null,
+        };
+
         const handlePlayAgain = async () => {
           const matchRef = ref(db, `matches/${currentMatchId}`);
-          await update(matchRef, {
-            state: 'ROOM_SETUP',
-            winner: null,
-            gameOverReason: null,
-            player1Score: 0,
-            player2Score: 0,
-            player1Letter: null,
-            player2Letter: null,
-            player1Pass: null,
-            player2Pass: null,
-            player1Role: null,
-            player2Role: null,
-            startLetter: null,
-            endLetter: null,
-            roundStartTime: null,
-            currentRound: null,
-            lastRoundResult: null,
-            minWordLength: null,
-            winTarget: null,
-          });
+          await update(matchRef, resetMatchState);
+        };
+
+        const handleBackToRoom = async () => {
+          const matchRef = ref(db, `matches/${currentMatchId}`);
+          await update(matchRef, resetMatchState);
+          // currentMatchId stays set — Lobby picks it up via initialMatchId
         };
 
         return (
@@ -266,11 +274,7 @@ function App() {
 
               <div className="popup-actions">
                 <button className="primary" onClick={handlePlayAgain}>Play Again</button>
-                <button onClick={() => {
-                  setGameState('LOBBY');
-                  setMatchData(null);
-                  setCurrentMatchId(null);
-                }}>Leave</button>
+                <button onClick={handleBackToRoom}>Back to Room</button>
               </div>
             </div>
           </div>

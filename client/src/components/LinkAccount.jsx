@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { sendSignInLinkToEmail } from 'firebase/auth';
 import { auth } from '../firebase';
 
-export default function LinkAccount({ onClose }) {
+export default function LinkAccount({ onClose, username }) {
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -18,16 +18,15 @@ export default function LinkAccount({ onClose }) {
     setLoading(true);
     setError(null);
 
-    const actionCodeSettings = {
-      // URL you want to redirect back to. The domain (www.example.com) for this
-      // URL must be naturally white-listed in the Firebase Console.
-      url: window.location.origin,
-      handleCodeInApp: true,
-    };
-
     try {
-      await sendSignInLinkToEmail(auth, email, actionCodeSettings);
       window.localStorage.setItem('emailForSignIn', email);
+
+      const continueUrl = `${window.location.origin}?email=${encodeURIComponent(email)}&username=${encodeURIComponent(username)}`;
+
+      await sendSignInLinkToEmail(auth, email, {
+        url: continueUrl,
+        handleCodeInApp: true,
+      });
       setSent(true);
     } catch (err) {
       console.error(err);
@@ -57,7 +56,7 @@ export default function LinkAccount({ onClose }) {
           </div>
         ) : (
           <>
-            <p style={{ color: 'var(--text-muted)', marginBottom: '1.5rem', fontSize: '0.9rem', lineHeight: 1.5 }}>
+            <p style={{ color: 'var(--text-muted)', marginBottom: '1.5rem', fontSize: '0.9rem', lineHeight: 1.5, textAlign: 'justify' }}>
               By linking an email address, your profile and stats will be securely backed up. You can log into this account from any device.
             </p>
 
