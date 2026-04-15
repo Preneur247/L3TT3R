@@ -391,15 +391,18 @@ export default function Lobby({ user, profile, setMatchId }) {
     if (mode === 'solo') {
       return (
         <div className="action-panel">
-          <button className="primary" style={{ width: '100%', marginBottom: '0.75rem' }} disabled>
-            Start Practice
+          <button className="primary" style={{ width: '100%', marginBottom: '0.75rem', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }} disabled>
+            <span>Start Practice</span>
+            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 'normal', marginTop: '0.2rem' }}>Coming Soon</span>
           </button>
           <div style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
-            <button style={{ flex: 1 }} disabled>
-              Leaderboard
+            <button style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0.75rem 0.5rem' }} disabled>
+              <span>Leaderboard</span>
+              <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 'normal', marginTop: '0.2rem' }}>Coming Soon</span>
             </button>
-            <button style={{ flex: 1 }} disabled>
-              Best Streak
+            <button style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0.75rem 0.5rem' }} disabled>
+              <span>Best Streak</span>
+              <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 'normal', marginTop: '0.2rem' }}>Coming Soon</span>
             </button>
           </div>
         </div>
@@ -409,15 +412,18 @@ export default function Lobby({ user, profile, setMatchId }) {
     if (mode === 'party') {
       return (
         <div className="action-panel">
-          <button className="primary" style={{ width: '100%', marginBottom: '0.75rem' }} disabled>
-            Quick Match (Coming Soon)
+          <button className="primary" style={{ width: '100%', marginBottom: '0.75rem', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }} disabled>
+            <span>Quick Match</span>
+            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 'normal', marginTop: '0.2rem' }}>Coming Soon</span>
           </button>
           <div style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
-            <button style={{ flex: 1 }} disabled>
-              Create Room
+            <button style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0.75rem 0.5rem' }} disabled>
+              <span>Create Room</span>
+              <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 'normal', marginTop: '0.2rem' }}>Coming Soon</span>
             </button>
-            <button style={{ flex: 1 }} disabled>
-              Join by Code
+            <button style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0.75rem 0.5rem' }} disabled>
+              <span>Join by Code</span>
+              <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 'normal', marginTop: '0.2rem' }}>Coming Soon</span>
             </button>
           </div>
         </div>
