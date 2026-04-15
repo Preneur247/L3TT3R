@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { ref, update, onValue, get } from 'firebase/database';
-import { db } from '../firebase';
+import { doc, getDoc } from 'firebase/firestore';
+import { db, firestore } from '../firebase';
 
 function getTimerClass(seconds) {
   if (seconds > 30) return 'safe';
@@ -19,7 +20,7 @@ const getTranslation = async (word) => {
   }
 };
 
-export default function GameBoard({ user, matchId, matchData }) {
+export default function GameBoard({ user, profile, matchId, matchData }) {
   const [word, setWord] = useState('');
   const [letter, setLetter] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
@@ -33,6 +34,8 @@ export default function GameBoard({ user, matchId, matchData }) {
   // the next real input (focus transitions input→input, keyboard never closes).
   const holdingRef = useRef(null);
 
+  const [oppUsername, setOppUsername] = useState('Opp');
+
   const isP1 = user.uid === matchData.player1;
   const myRole = isP1 ? matchData.player1Role : matchData.player2Role;
   const myLetter = isP1 ? matchData.player1Letter : matchData.player2Letter;
@@ -44,6 +47,15 @@ export default function GameBoard({ user, matchId, matchData }) {
   const oppGameWins = isP1 ? (matchData.player2GameWins || 0) : (matchData.player1GameWins || 0);
   const gameWinsTracked = matchData.player1GameWins !== undefined || matchData.player2GameWins !== undefined;
   const winTarget = matchData.winTarget || 5;
+
+  // Fetch opponent username
+  useEffect(() => {
+    const oppUid = isP1 ? matchData.player2 : matchData.player1;
+    if (!oppUid) return;
+    getDoc(doc(firestore, 'users', oppUid)).then(snap => {
+      if (snap.exists()) setOppUsername(snap.data().username || 'Opp');
+    }).catch(() => {});
+  }, [matchData.player1, matchData.player2]);
 
   // Load Dictionary
   useEffect(() => {
@@ -290,11 +302,11 @@ export default function GameBoard({ user, matchId, matchData }) {
       <div className="game-board">
       <div className="scoreboard">
         <div className="score-item">
-          <span className="label">You</span>
+          <span className="label">{profile?.username || 'You'}</span>
           <span className="value">{myScore}</span>
         </div>
         <div className="score-item">
-          <span className="label">Opp</span>
+          <span className="label">{oppUsername}</span>
           <span className="value">{oppScore}</span>
         </div>
       </div>

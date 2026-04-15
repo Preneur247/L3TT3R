@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { auth, db, firestore } from './firebase';
-import { isSignInWithEmailLink, signInWithEmailLink, EmailAuthProvider, linkWithCredential } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { isSignInWithEmailLink, signInWithEmailLink, signOut } from 'firebase/auth';
+import { doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
 import { ref, onValue, set, push, onDisconnect, remove, update } from 'firebase/database';
 import Lobby from './components/Lobby';
 import GameBoard from './components/GameBoard';
@@ -31,72 +31,103 @@ function App() {
   };
 
   useEffect(() => {
+    let isProcessing = false;
+
     const handleAuth = async () => {
+      if (isProcessing) return;
+      isProcessing = true;
+      
       // Handle magic link redirect when user clicks link from email
       if (isSignInWithEmailLink(auth, window.location.href)) {
-        let email = window.localStorage.getItem('emailForSignIn');
-        if (!email) {
-          email = window.prompt('Please provide your email for confirmation');
+        // Capture URL params NOW — before anything clears the URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const email = urlParams.get('email') || window.localStorage.getItem('emailForSignIn');
+        const pendingUsername = urlParams.get('username');
+
+        // Wait for Firebase to re-hydrate its persisted auth state from localStorage.
+        // auth.currentUser is null synchronously on page load — we must await this.
+        const initialUser = await new Promise(resolve => {
+          const unsub = auth.onAuthStateChanged(u => { unsub(); resolve(u); });
+        });
+
+        // If the user is already fully signed in (non-anonymous) and has a profile,
+        // the email link was already used — just restore the session and go to lobby.
+        if (initialUser && !initialUser.isAnonymous) {
+          const profileSnap = await getDoc(doc(firestore, 'users', initialUser.uid));
+          if (profileSnap.exists()) {
+            window.history.replaceState(null, '', window.location.pathname);
+            window.localStorage.removeItem('emailForSignIn');
+            setUser(initialUser);
+            setProfile(profileSnap.data());
+            setAuthState('ready');
+            return;
+          }
         }
 
-        if (email) {
-          try {
-            await auth.authStateReady();
-            const pendingLinkUid = window.localStorage.getItem('pendingLinkUid');
+        if (!email) {
+          setAuthState('onboarding');
+          return;
+        }
 
-            // Step 1: get a finalUser — prefer linking to the anonymous account so the
-            // UID stays the same; fall back to a plain email sign-in if that isn't possible.
-            let finalUser;
-            if (auth.currentUser && auth.currentUser.isAnonymous) {
-              try {
-                const credential = EmailAuthProvider.credentialWithLink(email, window.location.href);
-                const usercred = await linkWithCredential(auth.currentUser, credential);
-                finalUser = usercred.user;
-              } catch (linkErr) {
-                // Linking failed (e.g. email already used by another account).
-                // Fall back to a plain email sign-in — the UID will differ.
-                console.warn('linkWithCredential failed, falling back to signInWithEmailLink:', linkErr.code);
-                const result = await signInWithEmailLink(auth, email, window.location.href);
-                finalUser = result.user;
-              }
-            } else {
-              // No anonymous session (different device / browser / session cleared).
-              const result = await signInWithEmailLink(auth, email, window.location.href);
-              finalUser = result.user;
-            }
+        try {
+          const currentHref = window.location.href;
 
-            window.localStorage.removeItem('emailForSignIn');
-            window.localStorage.removeItem('pendingLinkUid');
-            window.history.replaceState(null, '', window.location.pathname);
-            setUser(finalUser);
+          // Sign out any anonymous user and wait for the auth state to fully clear
+          // before calling signInWithEmailLink. signOut() resolves before Firebase's
+          // internal state machine finishes — if we call signInWithEmailLink while
+          // auth.currentUser is still in memory, Firebase auto-links and throws
+          // email-already-in-use (burning the OTP so any retry gets a 400).
+          if (initialUser?.isAnonymous) {
+            await signOut(auth);
+            await new Promise(resolve => {
+              if (!auth.currentUser) { resolve(); return; }
+              const unsub = auth.onAuthStateChanged(u => { if (!u) { unsub(); resolve(); } });
+            });
+          }
 
-            // Step 2: find the profile.
-            // If the UID didn't change (linkWithCredential path) it's at finalUser.uid.
-            // If the UID changed (signInWithEmailLink path) it's still at pendingLinkUid —
-            // copy it over so the new UID has a profile.
-            const profileSnap = await getDoc(doc(firestore, 'users', finalUser.uid));
-            if (profileSnap.exists()) {
-              setProfile(profileSnap.data());
-              setAuthState('ready');
-            } else if (pendingLinkUid && pendingLinkUid !== finalUser.uid) {
-              const anonSnap = await getDoc(doc(firestore, 'users', pendingLinkUid));
-              if (anonSnap.exists()) {
-                const profileData = anonSnap.data();
+          const { user: finalUser } = await signInWithEmailLink(auth, email, currentHref);
+
+          // Clear localStorage and URL
+          window.localStorage.removeItem('emailForSignIn');
+          window.history.replaceState(null, '', window.location.pathname);
+          setUser(finalUser);
+
+          // Check for an existing full profile under this uid (returning user / Sign In flow)
+          const existingSnap = await getDoc(doc(firestore, 'users', finalUser.uid));
+          if (existingSnap.exists() && existingSnap.data().username) {
+            const profileData = { ...existingSnap.data(), email: finalUser.email };
+            await setDoc(doc(firestore, 'users', finalUser.uid), { email: finalUser.email }, { merge: true });
+            setProfile(profileData);
+            setAuthState('ready');
+            return;
+          }
+
+          // Restore profile via claimed_usernames → original uid → users/{uid}
+          // Covers first-time Link Account (uid changed after signOut) and cross-device
+          if (pendingUsername) {
+            const cleanName = pendingUsername.toLowerCase().replace(/[^a-z0-9]/g, '');
+            const claimSnap = await getDoc(doc(firestore, 'claimed_usernames', cleanName));
+            if (claimSnap.exists()) {
+              const originalUid = claimSnap.data().uid;
+              const profileSnap = await getDoc(doc(firestore, 'users', originalUid));
+              if (profileSnap.exists()) {
+                const profileData = { ...profileSnap.data(), email: finalUser.email };
                 await setDoc(doc(firestore, 'users', finalUser.uid), profileData);
+                await setDoc(doc(firestore, 'claimed_usernames', cleanName), { uid: finalUser.uid }, { merge: true });
+                if (originalUid !== finalUser.uid) {
+                  await deleteDoc(doc(firestore, 'users', originalUid));
+                }
                 setProfile(profileData);
                 setAuthState('ready');
-              } else {
-                setAuthState('onboarding');
+                return;
               }
-            } else {
-              setAuthState('onboarding');
             }
-
-          } catch (error) {
-            console.error('Email link auth error:', error.code, error.message);
-            setAuthState('onboarding');
           }
-        } else {
+
+          setAuthState('onboarding');
+
+        } catch (error) {
+          console.error('Email link auth error:', error.code, error.message);
           setAuthState('onboarding');
         }
       } else {

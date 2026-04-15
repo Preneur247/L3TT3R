@@ -14,16 +14,16 @@ function generateRoomCode() {
 }
 
 const MODES = [
-  { id: 'solo',    label: 'Solo',    icon: '👤' },
-  { id: 'versus',  label: 'Versus',  icon: '⚔️' },
-  { id: 'party',   label: 'Party',   icon: '👥' },
+  { id: 'solo', label: 'Solo', icon: '👤' },
+  { id: 'versus', label: 'Versus', icon: '⚔️' },
+  { id: 'party', label: 'Party', icon: '👥' },
 ];
 
 const RULES = {
   solo: [
-    'Practice mode to improve your speed and vocabulary.',
+    'Timed mode to test your speed and vocabulary.',
     'Form a valid English word that starts and ends with the given letters.',
-    'Play at your own pace without a timer.',
+    'Race against the clock to submit as many words as possible.',
     'The winning word is translated to Chinese after each round. 🎉',
   ],
   versus: [
@@ -122,7 +122,7 @@ export default function Lobby({ user, profile, setMatchId }) {
       try {
         const p1Snap = await getDoc(doc(firestore, 'users', data.player1));
         if (p1Snap.exists()) p1Username = p1Snap.data().username;
-      } catch {}
+      } catch { }
       players.push({ uid: data.player1, username: p1Username, isHost: true });
 
       if (data.player2) {
@@ -130,7 +130,7 @@ export default function Lobby({ user, profile, setMatchId }) {
         try {
           const p2Snap = await getDoc(doc(firestore, 'users', data.player2));
           if (p2Snap.exists()) p2Username = p2Snap.data().username;
-        } catch {}
+        } catch { }
         players.push({ uid: data.player2, username: p2Username, isHost: false });
       }
       setRoomPlayers(players);
@@ -206,7 +206,7 @@ export default function Lobby({ user, profile, setMatchId }) {
         letterMode: letterMode
       });
       // Clean up room code index now that the game has started
-      if (mCode) await remove(ref(db, `room_codes/${mCode}`)).catch(() => {});
+      if (mCode) await remove(ref(db, `room_codes/${mCode}`)).catch(() => { });
       setShowRoomModal(false);
       setRoomPlayers([]);
       setMatchId(mId);
@@ -346,7 +346,7 @@ export default function Lobby({ user, profile, setMatchId }) {
     setRoomCode(code);
     setRoomPlayers([{ uid: user.uid, username: profile?.username || 'You', isHost: true }]);
     setRoomTab('room');
-    
+
     const initialData = {
       id: matchId,
       player1: user.uid,
@@ -359,7 +359,7 @@ export default function Lobby({ user, profile, setMatchId }) {
       winTarget: roomSettings.winTarget,
       letterMode: letterMode
     };
-    
+
     setMatchData(initialData);
     setShowRoomModal(true);
     try {
@@ -392,7 +392,7 @@ export default function Lobby({ user, profile, setMatchId }) {
       return (
         <div className="action-panel">
           <button className="primary" style={{ width: '100%', marginBottom: '0.75rem', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }} disabled>
-            <span>Start Practice</span>
+            <span>Solo Blitz</span>
             <span style={{ fontSize: '0.75rem', color: 'rgba(255, 255, 255, 0.65)', fontWeight: 'normal', marginTop: '0.2rem' }}>Coming Soon</span>
           </button>
           <div style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
@@ -401,7 +401,7 @@ export default function Lobby({ user, profile, setMatchId }) {
               <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 'normal', marginTop: '0.2rem' }}>Coming Soon</span>
             </button>
             <button style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0.75rem 0.5rem' }} disabled>
-              <span>Best Streak</span>
+              <span>Challenges</span>
               <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 'normal', marginTop: '0.2rem' }}>Coming Soon</span>
             </button>
           </div>
@@ -555,8 +555,10 @@ export default function Lobby({ user, profile, setMatchId }) {
                     gap: '0.5rem',
                     color: 'var(--glow-success)'
                   }}>
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
-                    <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>Account secured & backed up</span>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+                    <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>
+                      Account linked with <span style={{ fontWeight: 400, opacity: 0.85 }}>{profile?.email || user.email}</span>
+                    </span>
                   </div>
                 )}
               </div>
@@ -565,15 +567,15 @@ export default function Lobby({ user, profile, setMatchId }) {
             <div className="settings-group">
               <label className="settings-label">App Interface</label>
               <select className="glass-select" value={language} onChange={e => setLanguage(e.target.value)}>
-                <option value="en">English (en)</option>
-                <option value="zh-TW">繁體中文 (zh-TW)</option>
+                <option value="en">English</option>
+                <option value="zh-TW">繁體中文</option>
               </select>
             </div>
 
             <div className="settings-group">
               <label className="settings-label">Word Translation</label>
               <select className="glass-select" value="zh-TW" disabled>
-                <option value="zh-TW">繁體中文 (zh-TW)</option>
+                <option value="zh-TW">繁體中文</option>
               </select>
             </div>
 
@@ -636,123 +638,123 @@ export default function Lobby({ user, profile, setMatchId }) {
         <div className="popup-overlay">
           <div className="rules-modal" onClick={e => e.stopPropagation()} style={{ maxHeight: '90dvh', display: 'flex', flexDirection: 'column' }}>
             <div style={{ overflowY: 'auto', flex: 1 }}>
-            <h2 style={{ color: 'var(--glow-color)', marginBottom: '1.25rem', marginTop: 0, fontSize: '1.75rem', textAlign: 'center' }}>
-              Game Room
-            </h2>
+              <h2 style={{ color: 'var(--glow-color)', marginBottom: '1.25rem', marginTop: 0, fontSize: '1.75rem', textAlign: 'center' }}>
+                Game Room
+              </h2>
 
-            <div className="tags-row" style={{ marginBottom: '1.25rem' }}>
-              <span className="badge-tag badge-versus">Versus Mode</span>
-              <span className={`badge-tag ${matchData.isPublic ? 'badge-public' : 'badge-private'}`}>
-                {matchData.isPublic ? 'Public' : 'Private'}
-              </span>
-            </div>
+              <div className="tags-row" style={{ marginBottom: '1.25rem' }}>
+                <span className="badge-tag badge-versus">Versus Mode</span>
+                <span className={`badge-tag ${matchData.isPublic ? 'badge-public' : 'badge-private'}`}>
+                  {matchData.isPublic ? 'Public' : 'Private'}
+                </span>
+              </div>
 
-            {/* Tab bar */}
-            <div className="game-tabs" style={{ marginBottom: '1.25rem' }}>
-              <button
-                className={`game-tab${roomTab === 'room' ? ' game-tab-active' : ''}`}
-                onClick={() => setRoomTab('room')}
-              >Room</button>
-              <button
-                className={`game-tab${roomTab === 'setup' ? ' game-tab-active' : ''}`}
-                onClick={() => setRoomTab('setup')}
-              >Setup</button>
-            </div>
+              {/* Tab bar */}
+              <div className="game-tabs" style={{ marginBottom: '1.25rem' }}>
+                <button
+                  className={`game-tab${roomTab === 'room' ? ' game-tab-active' : ''}`}
+                  onClick={() => setRoomTab('room')}
+                >Room</button>
+                <button
+                  className={`game-tab${roomTab === 'setup' ? ' game-tab-active' : ''}`}
+                  onClick={() => setRoomTab('setup')}
+                >Setup</button>
+              </div>
 
-            {/* Room tab */}
-            {roomTab === 'room' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
-                {/* Players with count */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <label className="settings-label" style={{ marginBottom: 0 }}>Players</label>
-                  <span style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--glow-color)' }}>{roomPlayers.length}/2</span>
-                </div>
-                <div className="room-player-slot filled">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                  <span className="room-player-name">{roomPlayers[0]?.username || 'Host'}</span>
-                  <span className="room-player-badge">Host</span>
-                </div>
-                <div className={`room-player-slot ${roomPlayers[1] ? 'filled' : 'waiting'}`}>
-                  {roomPlayers[1] ? (
-                    <>
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                      <span className="room-player-name">{roomPlayers[1].username}</span>
-                    </>
-                  ) : (
-                    <>
-                      <span className="spinner" style={{ width: '1.2rem', height: '1.2rem', opacity: 0.5, flexShrink: 0 }} />
-                      <span className="room-player-name" style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontWeight: 500 }}>Waiting...</span>
-                    </>
+              {/* Room tab */}
+              {roomTab === 'room' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
+                  {/* Players with count */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <label className="settings-label" style={{ marginBottom: 0 }}>Players</label>
+                    <span style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--glow-color)' }}>{roomPlayers.length}/2</span>
+                  </div>
+                  <div className="room-player-slot filled">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                    <span className="room-player-name">{roomPlayers[0]?.username || 'Host'}</span>
+                    <span className="room-player-badge">Host</span>
+                  </div>
+                  <div className={`room-player-slot ${roomPlayers[1] ? 'filled' : 'waiting'}`}>
+                    {roomPlayers[1] ? (
+                      <>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                        <span className="room-player-name">{roomPlayers[1].username}</span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="spinner" style={{ width: '1.2rem', height: '1.2rem', opacity: 0.5, flexShrink: 0 }} />
+                        <span className="room-player-name" style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontWeight: 500 }}>Waiting...</span>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Room Code — below players */}
+                  {!matchData.isPublic && matchData.roomCode && (
+                    <div
+                      className="room-code-section copyable"
+                      onClick={copyRoomCode}
+                      style={{ marginTop: '0.25rem' }}
+                    >
+                      <div className="label">Room Code</div>
+                      <div className="code">{matchData.roomCode}</div>
+                      <div className={`room-code-hint${copiedCode ? ' copied' : ''}`}>
+                        {copiedCode ? '✓ Copied!' : 'Tap to copy'}
+                      </div>
+                    </div>
                   )}
                 </div>
+              )}
 
-                {/* Room Code — below players */}
-                {!matchData.isPublic && matchData.roomCode && (
-                  <div
-                    className="room-code-section copyable"
-                    onClick={copyRoomCode}
-                    style={{ marginTop: '0.25rem' }}
-                  >
-                    <div className="label">Room Code</div>
-                    <div className="code">{matchData.roomCode}</div>
-                    <div className={`room-code-hint${copiedCode ? ' copied' : ''}`}>
-                      {copiedCode ? '✓ Copied!' : 'Tap to copy'}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Setup tab */}
-            {roomTab === 'setup' && (
-              <div style={{ marginBottom: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-                <div className="settings-group" style={{ marginBottom: 0 }}>
-                  <label className="settings-label">Letter Selection</label>
-                  <div className="segmented-control" style={{ width: '100%' }}>
-                    <button
-                      className={`segment ${matchData.letterMode === 'system' ? 'segment-active' : ''}`}
-                      onClick={() => updateRoomSetting('letterMode', 'system')}
-                      disabled={user.uid !== matchData.player1}
-                      style={{ flex: 1 }}
-                    >System</button>
-                    <button
-                      className={`segment ${matchData.letterMode === 'players' ? 'segment-active' : ''}`}
-                      onClick={() => updateRoomSetting('letterMode', 'players')}
-                      disabled={user.uid !== matchData.player1}
-                      style={{ flex: 1 }}
-                    >Players</button>
-                  </div>
-                </div>
-
-                <div className="settings-group" style={{ marginBottom: 0 }}>
-                  <label className="settings-label">Min Length: <span style={{ color: 'var(--glow-color)', float: 'right' }}>{matchData.minWordLength || 3}</span></label>
-                  <input
-                    type="range"
-                    min="3"
-                    max="10"
-                    value={matchData.minWordLength || 3}
-                    onChange={(e) => updateRoomSetting('minWordLength', parseInt(e.target.value))}
-                    disabled={user.uid !== matchData.player1}
-                    style={{ width: '100%', height: '10px', background: 'rgba(255,255,255,0.1)', borderRadius: '5px', accentColor: 'var(--glow-color)' }}
-                  />
-                </div>
-
-                <div className="settings-group" style={{ marginBottom: 0 }}>
-                  <label className="settings-label">Target Points</label>
-                  <div className="segmented-control" style={{ width: '100%' }}>
-                    {[5, 10, 20].map(n => (
+              {/* Setup tab */}
+              {roomTab === 'setup' && (
+                <div style={{ marginBottom: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                  <div className="settings-group" style={{ marginBottom: 0 }}>
+                    <label className="settings-label">Letter Selection</label>
+                    <div className="segmented-control" style={{ width: '100%' }}>
                       <button
-                        key={n}
-                        className={`segment ${matchData.winTarget === n ? 'segment-active' : ''}`}
-                        onClick={() => updateRoomSetting('winTarget', n)}
+                        className={`segment ${matchData.letterMode === 'system' ? 'segment-active' : ''}`}
+                        onClick={() => updateRoomSetting('letterMode', 'system')}
                         disabled={user.uid !== matchData.player1}
                         style={{ flex: 1 }}
-                      >{n}</button>
-                    ))}
+                      >System</button>
+                      <button
+                        className={`segment ${matchData.letterMode === 'players' ? 'segment-active' : ''}`}
+                        onClick={() => updateRoomSetting('letterMode', 'players')}
+                        disabled={user.uid !== matchData.player1}
+                        style={{ flex: 1 }}
+                      >Players</button>
+                    </div>
+                  </div>
+
+                  <div className="settings-group" style={{ marginBottom: 0 }}>
+                    <label className="settings-label">Min Length: <span style={{ color: 'var(--glow-color)', float: 'right' }}>{matchData.minWordLength || 3}</span></label>
+                    <input
+                      type="range"
+                      min="3"
+                      max="10"
+                      value={matchData.minWordLength || 3}
+                      onChange={(e) => updateRoomSetting('minWordLength', parseInt(e.target.value))}
+                      disabled={user.uid !== matchData.player1}
+                      style={{ width: '100%', height: '10px', background: 'rgba(255,255,255,0.1)', borderRadius: '5px', accentColor: 'var(--glow-color)' }}
+                    />
+                  </div>
+
+                  <div className="settings-group" style={{ marginBottom: 0 }}>
+                    <label className="settings-label">Target Points</label>
+                    <div className="segmented-control" style={{ width: '100%' }}>
+                      {[5, 10, 20].map(n => (
+                        <button
+                          key={n}
+                          className={`segment ${matchData.winTarget === n ? 'segment-active' : ''}`}
+                          onClick={() => updateRoomSetting('winTarget', n)}
+                          disabled={user.uid !== matchData.player1}
+                          style={{ flex: 1 }}
+                        >{n}</button>
+                      ))}
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              )}
 
             </div>{/* end scrollable */}
             <div style={{ display: 'flex', gap: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--glass-border)', flexShrink: 0 }}>
@@ -852,13 +854,13 @@ export default function Lobby({ user, profile, setMatchId }) {
         {/* Utility Dock (Tutorial & Settings) */}
         <div className="util-opt3-pill">
           <button className="util-opt3-btn" onClick={() => { setTutorialMode(mode); setShowRules(true); }} title="Tutorial">
-             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
           </button>
           <button className="util-opt3-btn" onClick={() => setShowStats(true)} title="Stats">
-             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
           </button>
           <button className="util-opt3-btn" onClick={() => setShowSettings(true)} title="Settings">
-             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
           </button>
         </div>
       </div>

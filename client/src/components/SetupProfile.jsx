@@ -18,38 +18,31 @@ const inputStyle = {
   boxSizing: 'border-box',
   letterSpacing: '0.03em',
   transition: 'border-color 0.2s',
+  textTransform: 'uppercase',
 };
 
-async function claimUniqueTag(user, cleanName) {
-  const claimRef = doc(firestore, 'claimed_usernames', cleanName);
-  let assignedUsername;
+// Atomically signs in and claims the username. Throws if the name is taken.
+async function claimAndRegister(cleanName) {
+  await setPersistence(auth, browserLocalPersistence);
+  const { user } = await signInAnonymously(auth);
+  const username = cleanName.toUpperCase();
 
+  const claimRef = doc(firestore, 'claimed_usernames', cleanName);
   await runTransaction(firestore, async (tx) => {
     const snap = await tx.get(claimRef);
-    const nextTag = snap.exists() ? snap.data().nextTag : 1;
-
-    if (nextTag > 9999) {
-      throw new Error('This name is unavailable. Try a different one.');
-    }
-
-    const tag = String(nextTag).padStart(4, '0');
-    assignedUsername = `${cleanName}#${tag}`;
-
     if (snap.exists()) {
-      tx.update(claimRef, { nextTag: nextTag + 1 });
-    } else {
-      tx.set(claimRef, { nextTag: 2 });
+      throw new Error('That username is already taken. Try a different one.');
     }
-
+    tx.set(claimRef, { uid: user.uid });
     tx.set(doc(firestore, 'users', user.uid), {
-      username: assignedUsername,
+      username,
       stats: { wins: 0, gamesPlayed: 0 },
       settings: { appInterfaceLang: 'en', wordTranslationLang: 'zh-TW' },
       createdAt: Date.now(),
     });
   });
 
-  return assignedUsername;
+  return { user, username };
 }
 
 
@@ -64,6 +57,7 @@ export default function SetupProfile({ onAuthComplete }) {
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [claimedAuth, setClaimedAuth] = useState(null); // { user, username } set after Continue
   const [pendingAuth, setPendingAuth] = useState(null); // { user, profileData }
 
   const [showSettings, setShowSettings] = useState(false);
@@ -74,38 +68,33 @@ export default function SetupProfile({ onAuthComplete }) {
 
   const go = (s) => { setError(null); setStep(s); };
 
-  // ── Play path helpers ──────────────────────────────────────────────────────
-
-  const signInAndClaim = async () => {
-    await setPersistence(auth, browserLocalPersistence);
-    const { user } = await signInAnonymously(auth);
-    const username = await claimUniqueTag(user, cleanName);
-    return { user, username };
-  };
-
   const defaultProfile = (username) => ({
     username,
     stats: { wins: 0, gamesPlayed: 0 },
     settings: { appInterfaceLang: 'en', wordTranslationLang: 'zh-TW' },
   });
 
-  const handleContinue = (e) => {
+  // ── Play path helpers ──────────────────────────────────────────────────────
+
+  // Signs in + atomically claims the name; advances to backup prompt on success.
+  const handleContinue = async (e) => {
     e?.preventDefault();
     if (!nameValid) { setError('Name must be 3–12 letters or numbers.'); return; }
-    go('prompt');
-  };
-
-  const handleSkip = async () => {
     setLoading(true);
     setError(null);
     try {
-      const { user, username } = await signInAndClaim();
-      onAuthComplete(user, defaultProfile(username));
+      const result = await claimAndRegister(cleanName);
+      setClaimedAuth(result);
+      go('prompt');
     } catch (err) {
       console.error(err);
-      setError(err.message || 'Something went wrong.');
+      setError(err.message || 'Could not register username. Please try again.');
     }
     setLoading(false);
+  };
+
+  const handleSkip = () => {
+    onAuthComplete(claimedAuth.user, defaultProfile(claimedAuth.username));
   };
 
   // Send link for Play Link Account flow
@@ -115,14 +104,16 @@ export default function SetupProfile({ onAuthComplete }) {
     setLoading(true);
     setError(null);
     try {
-      const { user, username } = await signInAndClaim();
       window.localStorage.setItem('emailForSignIn', email);
-      window.localStorage.setItem('pendingLinkUid', user.uid);
+
+      // Embed email + username in the magic link URL so Device B can restore the account
+      const continueUrl = `${window.location.origin}?email=${encodeURIComponent(email)}&username=${encodeURIComponent(claimedAuth.username)}`;
+
       await sendSignInLinkToEmail(auth, email, {
-        url: window.location.origin,
+        url: continueUrl,
         handleCodeInApp: true,
       });
-      setPendingAuth({ user, profileData: defaultProfile(username) });
+      setPendingAuth({ user: claimedAuth.user, profileData: defaultProfile(claimedAuth.username) });
       setSentMode('link');
       setStep('sent');
     } catch (err) {
@@ -134,7 +125,7 @@ export default function SetupProfile({ onAuthComplete }) {
 
   // ── Login path helper ──────────────────────────────────────────────────────
 
-  // Send link for Login flow — no anonymous sign-in, no tag claim
+  // Send link for Login flow — no anonymous sign-in, no name claim
   const handleLoginSend = async (e) => {
     e?.preventDefault();
     if (!email || !email.includes('@')) { setError('Please enter a valid email.'); return; }
@@ -143,7 +134,7 @@ export default function SetupProfile({ onAuthComplete }) {
     try {
       window.localStorage.setItem('emailForSignIn', email);
       await sendSignInLinkToEmail(auth, email, {
-        url: window.location.origin,
+        url: `${window.location.origin}?email=${encodeURIComponent(email)}`,
         handleCodeInApp: true,
       });
       setSentMode('login');
@@ -192,7 +183,7 @@ export default function SetupProfile({ onAuthComplete }) {
                 onChange={(e) => { setError(null); setEmail(e.target.value); }}
                 placeholder="email@example.com"
                 autoFocus
-                style={{ ...inputStyle, fontSize: '1rem' }}
+                style={{ ...inputStyle, fontSize: '1rem', textTransform: 'none' }}
               />
               <div style={{ textAlign: 'center', fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
                 We'll send a one-tap sign-in link to your email.
@@ -209,32 +200,30 @@ export default function SetupProfile({ onAuthComplete }) {
             <form onSubmit={handleContinue} style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
                 <button type="button" onClick={() => go('welcome')} className="back-nav-btn">‹</button>
-                <span style={{ fontWeight: 700, color: 'var(--text-main)' }}>Choose a name</span>
+                <span style={{ fontWeight: 700, color: 'var(--text-main)' }}>Choose a username</span>
               </div>
               <input
                 type="text"
                 value={name}
                 onChange={(e) => { setError(null); setName(e.target.value); }}
-                placeholder="Enter a display name"
+                placeholder=""
                 maxLength={12}
                 autoFocus
                 style={inputStyle}
               />
               <div style={{ textAlign: 'center', fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                {nameValid
-                  ? <><strong style={{ color: 'var(--text-main)' }}>{cleanName}#????</strong> — a unique tag will be assigned</>
-                  : 'Letters and numbers only, 3–12 characters'}
+                Letters and numbers only, 3–12 characters
               </div>
               {error && <div className="error-message" style={{ textAlign: 'center', fontSize: '0.85rem' }}>{error}</div>}
-              <button type="submit" className="primary" style={{ width: '100%' }} disabled={!nameValid}>
-                Continue
+              <button type="submit" className="primary" style={{ width: '100%' }} disabled={!nameValid || loading}>
+                {loading ? <span className="spinner" /> : 'Continue'}
               </button>
             </form>
           )}
 
           {/* ── Play: backup prompt ─────────────────────────────────────── */}
           {step === 'prompt' && (
-            <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+            <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '1.25rem', alignItems: 'stretch' }}>
               <div style={{
                 background: 'rgba(255,255,255,0.04)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -245,26 +234,27 @@ export default function SetupProfile({ onAuthComplete }) {
                 alignItems: 'center',
                 gap: '0.75rem',
                 textAlign: 'center',
+                width: '100%',
+                boxSizing: 'border-box'
               }}>
                 <div style={{ fontSize: '2.5rem' }}>🔒</div>
                 <div style={{ fontWeight: 700, fontSize: '1rem', color: 'var(--text-main)' }}>
                   Back up your account
                 </div>
-                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.6 }}>
-                  Your tag <strong style={{ color: 'var(--text-main)' }}>{cleanName}#????</strong> is saved on this browser only.
-                  If you clear your cache or switch devices, you'll lose your name and stats.
+                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.6, textAlign: 'justify' }}>
+                  Your account is saved on this browser only. If you clear your cache or switch devices, you'll lose all your account data.
                 </div>
-                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.6 }}>
-                  Link an email to restore your account from any device — no password needed.
+                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.6, textAlign: 'justify' }}>
+                  Link an email to secure your account and restore it from any device.
                 </div>
               </div>
               {error && <div className="error-message" style={{ textAlign: 'center', fontSize: '0.85rem' }}>{error}</div>}
-              <div style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
-                <button style={{ flex: 1 }} onClick={handleSkip} disabled={loading}>
-                  {loading ? <span className="spinner" /> : 'Skip for now'}
+              <div style={{ display: 'flex', gap: '0.75rem', width: '100%', boxSizing: 'border-box' }}>
+                <button style={{ flex: 1, whiteSpace: 'nowrap', boxSizing: 'border-box', padding: '0.75rem 0' }} onClick={handleSkip} disabled={loading}>
+                  Skip for now
                 </button>
-                <button className="primary" style={{ flex: 1.5 }} onClick={() => go('link')} disabled={loading}>
-                  ✉ Link Account
+                <button className="primary" style={{ flex: 1, whiteSpace: 'nowrap', boxSizing: 'border-box', padding: '0.75rem 0' }} onClick={() => go('link')} disabled={loading}>
+                  Link Account
                 </button>
               </div>
             </div>
@@ -283,7 +273,7 @@ export default function SetupProfile({ onAuthComplete }) {
                 onChange={(e) => { setError(null); setEmail(e.target.value); }}
                 placeholder="email@example.com"
                 autoFocus
-                style={{ ...inputStyle, fontSize: '1rem' }}
+                style={{ ...inputStyle, fontSize: '1rem', textTransform: 'none' }}
               />
               <div style={{ textAlign: 'center', fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
                 We'll send a one-tap magic link — no password needed.
@@ -316,14 +306,14 @@ export default function SetupProfile({ onAuthComplete }) {
                 <div style={{ fontWeight: 700, fontSize: '1rem', color: 'var(--text-main)' }}>
                   Check your email
                 </div>
-                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.6 }}>
+                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.6, textAlign: 'center' }}>
                   A sign-in link was sent to<br />
                   <strong style={{ color: 'var(--text-main)' }}>{email}</strong>
                 </div>
-                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.6 }}>
+                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.6, textAlign: 'justify' }}>
                   {sentMode === 'login'
                     ? 'Click the link in the email to sign in to your account.'
-                    : 'Click the link in the email to link your account and enter the lobby.'}
+                    : 'Click the link in your inbox to link your account. Check your spam folder if needed.'}
                 </div>
               </div>
               {/* Only the Play Link flow has an escape hatch */}
@@ -366,14 +356,14 @@ export default function SetupProfile({ onAuthComplete }) {
             <div className="settings-group">
               <label className="settings-label">App Interface</label>
               <select className="glass-select" value={language} onChange={e => setLanguage(e.target.value)}>
-                <option value="en">English (en)</option>
-                <option value="zh-TW">繁體中文 (zh-TW)</option>
+                <option value="en">English</option>
+                <option value="zh-TW">繁體中文</option>
               </select>
             </div>
             <div className="settings-group">
               <label className="settings-label">Word Translation</label>
               <select className="glass-select" value="zh-TW" disabled>
-                <option value="zh-TW">繁體中文 (zh-TW)</option>
+                <option value="zh-TW">繁體中文</option>
               </select>
             </div>
             <div style={{ textAlign: 'center', marginTop: '2.5rem' }}>
