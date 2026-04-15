@@ -410,7 +410,7 @@ export default function Lobby({ user, profile, setMatchId }) {
       return (
         <div className="action-panel">
           <button className="primary" style={{ width: '100%', marginBottom: '0.75rem' }} disabled>
-            Quick Match
+            Quick Match (Coming Soon)
           </button>
           <div style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
             <button style={{ flex: 1 }} disabled>
