@@ -393,7 +393,7 @@ export default function Lobby({ user, profile, setMatchId }) {
         <div className="action-panel">
           <button className="primary" style={{ width: '100%', marginBottom: '0.75rem', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }} disabled>
             <span>Start Practice</span>
-            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 'normal', marginTop: '0.2rem' }}>Coming Soon</span>
+            <span style={{ fontSize: '0.75rem', color: 'rgba(255, 255, 255, 0.65)', fontWeight: 'normal', marginTop: '0.2rem' }}>Coming Soon</span>
           </button>
           <div style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
             <button style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0.75rem 0.5rem' }} disabled>
@@ -414,7 +414,7 @@ export default function Lobby({ user, profile, setMatchId }) {
         <div className="action-panel">
           <button className="primary" style={{ width: '100%', marginBottom: '0.75rem', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }} disabled>
             <span>Quick Match</span>
-            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 'normal', marginTop: '0.2rem' }}>Coming Soon</span>
+            <span style={{ fontSize: '0.75rem', color: 'rgba(255, 255, 255, 0.65)', fontWeight: 'normal', marginTop: '0.2rem' }}>Coming Soon</span>
           </button>
           <div style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
             <button style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0.75rem 0.5rem' }} disabled>
