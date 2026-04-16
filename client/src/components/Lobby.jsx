@@ -5,7 +5,7 @@ import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
 import { db, firestore } from '../firebase';
 import LinkAccount from './LinkAccount';
 
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.1.1';
 
 function generateRoomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -44,17 +44,16 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
   const roomMatchIdRef = useRef(null);   // mirrors pendingMatchId for cancelRoom cleanup
   const roomCodeRef = useRef(null);      // mirrors roomCode for cancelRoom cleanup
   const matchDataRef = useRef(null);     // mirrors matchData to detect prev state in listener
-  const searchListenerRef = useRef(null);
-  const waitingListenerRef = useRef(null);
   const [roomTab, setRoomTab] = useState('room');
   const [statsView, setStatsView] = useState('current');
+  const [statTab, setStatTab] = useState('overall');
   const [copiedCode, setCopiedCode] = useState(false);
   const [showRules, setShowRules] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showStats, setShowStats] = useState(false);
+  const [showWordBank, setShowWordBank] = useState(false);
   const [showLinkModal, setShowLinkModal] = useState(false);
   const [tutorialMode, setTutorialMode] = useState('versus');
-  const [language, setLanguage] = useState('zh-TW'); // Represents wordTranslationLang which is currently fixed to zh-TW
   const [pairStats, setPairStats] = useState(null);
   const pairStatsUnsubRef = useRef(null);
 
@@ -93,9 +92,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
 
   // ── Settings Sync ───────────────────────────────────────────────────────
   useEffect(() => {
-    if (profile?.settings?.wordTranslationLang) {
-      setLanguage('zh-TW');
-    }
+    // Sync language selection if wordTranslationLang is provided in profile
   }, [profile?.settings?.wordTranslationLang]);
 
   const updateUserSetting = async (key, value) => {
@@ -143,6 +140,13 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       if (data.matchState === 'ROOM_SETUP' || (data.matchState === 'WAITING' && data.player1Id === user.uid)) {
         setShowRoomModal(true);
         setPendingMatchId(mId);
+
+        // Ensure public match is listed in the search pool if it reverted to WAITING (guest dropped)
+        if (data.matchState === 'WAITING' && data.isPublic && data.player1Id === user.uid) {
+          const publicRef = ref(db, `lobby/waiting_matches/${data.mode || 'versus'}/${mId}`);
+          set(publicRef, true).catch(() => {});
+          onDisconnect(publicRef).remove();
+        }
       }
 
       // Transition to game — hand off matchId + data so App.jsx renders immediately
@@ -227,14 +231,14 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
         const publicRef = ref(db, `lobby/waiting_matches/${mode}/${mId}`);
         
         // Clean up onDisconnect first
-        await onDisconnect(matchRef).cancel();
-        if (mCode) await onDisconnect(codeRef).cancel();
-        await onDisconnect(publicRef).cancel();
+        await onDisconnect(matchRef).cancel().catch(() => {});
+        if (mCode) await onDisconnect(codeRef).cancel().catch(() => {});
+        await onDisconnect(publicRef).cancel().catch(() => {});
 
         if (isHost) {
           await remove(matchRef);
-          if (mCode) await remove(codeRef);
-          await remove(publicRef);
+          if (mCode) await remove(codeRef).catch(() => {});
+          await remove(publicRef).catch(() => {});
         } else {
           // Guest leaving: clear self and reset room to WAITING
           await update(matchRef, {
@@ -278,9 +282,16 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
         letterMode: letterMode
       };
       await update(ref(db, `matches/${mId}`), startUpdates);
-      // Clean up room code index and public pool now that the game has started
-      if (mCode) await remove(ref(db, `room_codes/${mCode}`)).catch(() => { });
-      await remove(ref(db, `lobby/waiting_matches/${mode}/${mId}`)).catch(() => { });
+      
+      // Clean up room index, public pool, and onDisconnect listeners now that game started
+      if (mCode) {
+        onDisconnect(ref(db, `room_codes/${mCode}`)).cancel().catch(() => {});
+        await remove(ref(db, `room_codes/${mCode}`)).catch(() => {});
+      }
+      const publicRef = ref(db, `lobby/waiting_matches/${mode}/${mId}`);
+      onDisconnect(publicRef).cancel().catch(() => {});
+      await remove(publicRef).catch(() => {});
+
       setMatchId(mId, { ...matchData, ...startUpdates });
     } catch (err) {
       console.error('Start game error:', err);
@@ -480,7 +491,6 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
     }
   };
 
-  const toggleLanguage = () => setLanguage(l => l === 'en' ? 'zh-TW' : 'en');
 
 
   // ── Action panel per mode ─────────────────────────────────────────────────
@@ -609,28 +619,175 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
               Your Stats
             </h2>
 
-            <div style={{ display: 'flex', justifyContent: 'center', gap: '1.5rem', marginBottom: '2rem', textAlign: 'center' }}>
-              <div>
-                <div style={{ fontSize: '2.5rem', fontWeight: 800, color: 'var(--text-main)', lineHeight: 1.1 }}>14</div>
-                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Played</div>
-              </div>
-              <div>
-                <div style={{ fontSize: '2.5rem', fontWeight: 800, color: 'var(--text-main)', lineHeight: 1.1 }}>82</div>
-                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Win %</div>
-              </div>
-              <div>
-                <div style={{ fontSize: '2.5rem', fontWeight: 800, color: 'var(--text-main)', lineHeight: 1.1 }}>5</div>
-                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Streak</div>
-              </div>
+            <div className="mode-tabs" style={{ marginBottom: '1.5rem' }}>
+              {[
+                { id: 'overall', label: 'Total', icon: '🌍' },
+                { id: 'solo', label: 'Solo', icon: '👤' },
+                { id: 'versus', label: 'Versus', icon: '⚔️' },
+                { id: 'party', label: 'Party', icon: '👥' }
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  className={`mode-tab ${statTab === tab.id ? 'tab-active' : ''}`}
+                  onClick={() => setStatTab(tab.id)}
+                  style={{ fontSize: '0.82rem', padding: '0.6rem 0.2rem' }}
+                >
+                  {tab.icon} {tab.label}
+                </button>
+              ))}
             </div>
 
-            <div className="settings-group" style={{ textAlign: 'center' }}>
-              <label className="settings-label" style={{ textAlign: 'center' }}>Words Formed</label>
-              <div style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--glow-success)' }}>234</div>
-            </div>
+            {(() => {
+              const activeStats = profile?.stats?.[statTab] || { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0, currentStreak: 0, bestStreak: 0 };
+              const winRate = activeStats.gamesPlayed ? Math.round(((activeStats.gamesWon || 0) / activeStats.gamesPlayed) * 100) : 0;
+              const hasStreak = statTab !== 'overall';
+
+              return (
+                <div style={{ animation: 'fadeIn 0.3s ease-out' }}>
+                  <div style={{ display: 'flex', justifyContent: 'center', gap: '1rem', marginBottom: '2rem', textAlign: 'center' }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '2.2rem', fontWeight: 800, color: 'var(--text-main)', lineHeight: 1.1 }}>
+                        {activeStats.gamesPlayed || 0}
+                      </div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: '0.3rem' }}>Played</div>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '2.2rem', fontWeight: 800, color: 'var(--text-main)', lineHeight: 1.1 }}>
+                        {winRate}<span style={{ fontSize: '1.2rem', opacity: 0.6 }}>%</span>
+                      </div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: '0.3rem' }}>Win Rate</div>
+                    </div>
+                  </div>
+
+                  <div style={{ 
+                    background: 'rgba(255,255,255,0.03)', 
+                    borderRadius: '20px', 
+                    padding: '1.5rem', 
+                    border: '1px solid var(--glass-border)',
+                    marginBottom: '1rem',
+                    textAlign: 'center'
+                  }}>
+                    <label className="settings-label" style={{ marginBottom: '0.5rem', display: 'block', color: 'var(--text-muted)' }}>Words Formed</label>
+                    <div style={{ fontSize: '2.5rem', fontWeight: 900, color: 'var(--glow-success)', textShadow: '0 0 20px rgba(16, 185, 129, 0.3)' }}>
+                      {activeStats.wordsFormed || 0}
+                    </div>
+                  </div>
+
+                  {hasStreak && (
+                    <div style={{ display: 'flex', gap: '1rem' }}>
+                      <div style={{ 
+                        flex: 1, 
+                        background: 'rgba(56, 189, 248, 0.05)', 
+                        borderRadius: '16px', 
+                        padding: '1rem', 
+                        border: '1px solid rgba(56, 189, 248, 0.15)',
+                        textAlign: 'center'
+                      }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 800, color: 'var(--glow-color)' }}>{activeStats.currentStreak || 0}</div>
+                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Streak</div>
+                      </div>
+                      <div style={{ 
+                        flex: 1, 
+                        background: 'rgba(255, 215, 0, 0.05)', 
+                        borderRadius: '16px', 
+                        padding: '1rem', 
+                        border: '1px solid rgba(255, 215, 0, 0.15)',
+                        textAlign: 'center'
+                      }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#FFD700' }}>{activeStats.bestStreak || 0}</div>
+                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Best</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             <div style={{ textAlign: 'center', marginTop: '2.5rem' }}>
               <button className="primary" onClick={() => setShowStats(false)}>Close</button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {showWordBank && createPortal(
+        <div className="popup-overlay" onClick={() => setShowWordBank(false)}>
+          <div className="rules-modal" style={{ maxHeight: '85vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
+            <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', color: 'var(--glow-color)', marginBottom: '1.5rem', marginTop: 0, flexShrink: 0 }}>
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
+              Word Bank
+            </h2>
+
+            <div style={{ overflowY: 'auto', flex: 1, paddingRight: '0.5rem' }} className="word-bank-scroll">
+              {(() => {
+                const words = profile?.words || {};
+                const wordList = Object.keys(words).sort();
+                
+                if (wordList.length === 0) {
+                  return (
+                    <div style={{ textAlign: 'center', padding: '3rem 1rem', opacity: 0.5 }}>
+                      <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>📚</div>
+                      <p>Your word bank is empty. Play some games to start collecting words!</p>
+                    </div>
+                  );
+                }
+
+                const groups = wordList.reduce((acc, word) => {
+                  const first = word[0].toUpperCase();
+                  if (!acc[first]) acc[first] = [];
+                  acc[first].push({ word, count: words[word] });
+                  return acc;
+                }, {});
+
+                return Object.keys(groups).sort().map(letter => (
+                  <div key={letter} style={{ marginBottom: '1.5rem' }}>
+                    <div style={{ 
+                      fontSize: '0.9rem', 
+                      color: 'var(--glow-color)', 
+                      fontWeight: 800, 
+                      marginBottom: '0.75rem', 
+                      borderBottom: '1px solid rgba(255,255,255,0.1)',
+                      paddingBottom: '0.25rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.5rem'
+                    }}>
+                      {letter}
+                      <span style={{ fontSize: '0.7rem', opacity: 0.5, fontWeight: 400 }}>({groups[letter].length})</span>
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                      {groups[letter].map(item => (
+                        <div 
+                          key={item.word} 
+                          title={`Formed ${item.count} time${item.count > 1 ? 's' : ''}`}
+                          style={{
+                            padding: '0.4rem 0.8rem',
+                            background: 'rgba(255,255,255,0.05)',
+                            border: '1px solid var(--glass-border)',
+                            borderRadius: '8px',
+                            fontSize: '0.9rem',
+                            color: 'var(--text-main)',
+                            letterSpacing: '0.05em',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.4rem'
+                          }}
+                        >
+                          {item.word}
+                          {item.count > 1 && (
+                            <span style={{ fontSize: '0.7rem', color: 'var(--glow-success)', opacity: 0.8 }}>×{item.count}</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ));
+              })()}
+            </div>
+
+            <div style={{ textAlign: 'center', marginTop: '1.5rem', flexShrink: 0 }}>
+              <button className="primary" onClick={() => setShowWordBank(false)}>Close</button>
             </div>
           </div>
         </div>,
@@ -1178,6 +1335,9 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
           </button>
           <button className="util-opt3-btn" onClick={() => setShowStats(true)} title="Stats">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+          </button>
+          <button className="util-opt3-btn" title="Word Bank" onClick={() => setShowWordBank(true)}>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
           </button>
           <button className="util-opt3-btn" onClick={() => setShowSettings(true)} title="Settings">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>

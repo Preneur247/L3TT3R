@@ -3,7 +3,7 @@ import { doc, runTransaction } from 'firebase/firestore';
 import { signInAnonymously, sendSignInLinkToEmail, setPersistence, browserLocalPersistence } from 'firebase/auth';
 import { auth, firestore } from '../firebase';
 
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.1.1';
 
 
 // Atomically signs in and claims the username. Throws if the name is taken.
@@ -21,7 +21,13 @@ async function claimAndRegister(cleanName) {
     tx.set(claimRef, { uid: user.uid });
     tx.set(doc(firestore, 'users', user.uid), {
       username,
-      stats: { wins: 0, gamesPlayed: 0 },
+      stats: {
+        overall: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0 },
+        versus: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0, currentStreak: 0, bestStreak: 0 },
+        solo: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0, currentStreak: 0, bestStreak: 0 },
+        party: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0, currentStreak: 0, bestStreak: 0 }
+      },
+      words: {},
       settings: { appInterfaceLang: 'en', wordTranslationLang: 'zh-TW' },
       createdAt: Date.now(),
     });
@@ -55,7 +61,13 @@ export default function SetupProfile({ onAuthComplete }) {
 
   const defaultProfile = (username) => ({
     username,
-    stats: { wins: 0, gamesPlayed: 0 },
+    stats: {
+      overall: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0 },
+      versus: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0, currentStreak: 0, bestStreak: 0 },
+      solo: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0, currentStreak: 0, bestStreak: 0 },
+      party: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0, currentStreak: 0, bestStreak: 0 }
+    },
+    words: {},
     settings: { appInterfaceLang: 'en', wordTranslationLang: 'zh-TW' },
   });
 
