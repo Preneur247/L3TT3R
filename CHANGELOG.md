@@ -24,3 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added support for persistent user profiles and guest account linking.
 - New game modes and lobby configuration options for word length and win targets.
 - Enhanced UI consistency and glassmorphism styling across the app.
+
+## [0.1.1] - 2026-04-16
+### Added
+- Word Bank: Track and browse every unique word you have formed across all modes.
+- Grouped word display with frequency tracking.
+
+### Fixed
+- Real-time profile synchronization: Stats and Word Bank now update instantly after matches.
+- Matchmaking "zombies": Public rooms now correctly re-list if a guest disconnects early.
+- Performance: Removed redundant legacy code and optimized Firebase listeners.
