@@ -3,7 +3,7 @@ import { doc, runTransaction } from 'firebase/firestore';
 import { signInAnonymously, sendSignInLinkToEmail, setPersistence, browserLocalPersistence } from 'firebase/auth';
 import { auth, firestore } from '../firebase';
 
-const APP_VERSION = '0.0.2';
+const APP_VERSION = '0.1.0';
 
 
 // Atomically signs in and claims the username. Throws if the name is taken.
