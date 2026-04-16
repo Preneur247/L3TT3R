@@ -1,7 +1,7 @@
 {
   "rules": {
     "lobby": {
-      "public_waiting": {
+      "waiting_matches": {
         "$mode": {
           ".read": "auth != null",
           ".write": "auth != null"
@@ -17,7 +17,7 @@
     "matches": {
       "$matchId": {
         ".read": "auth != null",
-        ".write": "auth != null && (!data.exists() || data.child('player1').val() === auth.uid || data.child('player2').val() === auth.uid || newData.child('player2').val() === auth.uid)"
+        ".write": "auth != null && (!data.exists() || data.child('player1Id').val() === auth.uid || data.child('player2Id').val() === auth.uid || newData.child('player2Id').val() === auth.uid)"
       }
     }
   }

@@ -5,27 +5,12 @@ import { auth, firestore } from '../firebase';
 
 const APP_VERSION = '0.0.2';
 
-const inputStyle = {
-  width: '100%',
-  padding: '0.9rem 1rem',
-  fontSize: '1.1rem',
-  textAlign: 'center',
-  background: 'rgba(255, 255, 255, 0.06)',
-  border: '1px solid rgba(255, 255, 255, 0.12)',
-  borderRadius: '14px',
-  color: 'var(--text-main)',
-  outline: 'none',
-  boxSizing: 'border-box',
-  letterSpacing: '0.03em',
-  transition: 'border-color 0.2s',
-  textTransform: 'uppercase',
-};
 
 // Atomically signs in and claims the username. Throws if the name is taken.
 async function claimAndRegister(cleanName) {
   await setPersistence(auth, browserLocalPersistence);
   const { user } = await signInAnonymously(auth);
-  const username = cleanName.toUpperCase();
+  const username = cleanName.trim();
 
   const claimRef = doc(firestore, 'claimed_usernames', cleanName);
   await runTransaction(firestore, async (tx) => {
@@ -61,9 +46,9 @@ export default function SetupProfile({ onAuthComplete }) {
   const [pendingAuth, setPendingAuth] = useState(null); // { user, profileData }
 
   const [showSettings, setShowSettings] = useState(false);
-  const [language, setLanguage] = useState('en');
 
-  const cleanName = name.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  const cleanName = name.trim().replace(/[^a-zA-Z0-9]/g, '');
   const nameValid = cleanName.length >= 3 && cleanName.length <= 12;
 
   const go = (s) => { setError(null); setStep(s); };
@@ -150,21 +135,21 @@ export default function SetupProfile({ onAuthComplete }) {
 
   return (
     <>
-      <div className="glass-card" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minHeight: 'min-content' }}>
-        <div style={{ width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1.5rem' }}>
+      <div className="glass-card">
+        <div className="card-stack">
 
           <div style={{ textAlign: 'center' }}>
             <h1 style={{ margin: 0, marginBottom: '0.3rem' }}>L3TT3R</h1>
-            <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Two letters. One winner.</div>
+            <div className="version-text">Two letters. One winner.</div>
           </div>
 
           {/* ── Welcome ─────────────────────────────────────────────────── */}
           {step === 'welcome' && (
-            <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-              <button className="primary" style={{ width: '100%' }} onClick={() => go('name')}>
+            <div className="card-stack" style={{ gap: '0.75rem' }}>
+              <button className="primary full-width" onClick={() => go('name')}>
                 Play
               </button>
-              <button style={{ width: '100%' }} onClick={() => go('login')}>
+              <button className="full-width" onClick={() => go('login')}>
                 Sign In
               </button>
             </div>
@@ -172,9 +157,11 @@ export default function SetupProfile({ onAuthComplete }) {
 
           {/* ── Login: email input ──────────────────────────────────────── */}
           {step === 'login' && (
-            <form onSubmit={handleLoginSend} style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            <form onSubmit={handleLoginSend} className="card-stack" style={{ gap: '0.75rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
-                <button type="button" onClick={() => go('welcome')} className="back-nav-btn">‹</button>
+                <button type="button" onClick={() => go('welcome')} className="back-nav-btn">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                </button>
                 <span style={{ fontWeight: 700, color: 'var(--text-main)' }}>Sign in</span>
               </div>
               <input
@@ -183,13 +170,13 @@ export default function SetupProfile({ onAuthComplete }) {
                 onChange={(e) => { setError(null); setEmail(e.target.value); }}
                 placeholder="email@example.com"
                 autoFocus
-                style={{ ...inputStyle, fontSize: '1rem', textTransform: 'none' }}
+                className="glass-input no-transform"
               />
-              <div style={{ textAlign: 'center', fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                We'll send a one-tap sign-in link to your email.
+              <div className="info-text" style={{ textAlign: 'center' }}>
+                We'll email you a one-tap link.
               </div>
-              {error && <div className="error-message" style={{ textAlign: 'center', fontSize: '0.85rem' }}>{error}</div>}
-              <button type="submit" className="primary" style={{ width: '100%' }} disabled={loading || !email}>
+              {error && <div className="error-message">{error}</div>}
+              <button type="submit" className="primary full-width" disabled={loading || !email}>
                 {loading ? <span className="spinner" /> : 'Send Sign-in Link'}
               </button>
             </form>
@@ -197,25 +184,27 @@ export default function SetupProfile({ onAuthComplete }) {
 
           {/* ── Play: enter name ────────────────────────────────────────── */}
           {step === 'name' && (
-            <form onSubmit={handleContinue} style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            <form onSubmit={handleContinue} className="card-stack" style={{ gap: '0.75rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
-                <button type="button" onClick={() => go('welcome')} className="back-nav-btn">‹</button>
+                <button type="button" onClick={() => go('welcome')} className="back-nav-btn">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                </button>
                 <span style={{ fontWeight: 700, color: 'var(--text-main)' }}>Choose a username</span>
               </div>
               <input
                 type="text"
+                className="glass-input"
                 value={name}
-                onChange={(e) => { setError(null); setName(e.target.value); }}
+                onChange={(e) => { setError(null); setName(e.target.value.toUpperCase()); }}
                 placeholder=""
                 maxLength={12}
                 autoFocus
-                style={inputStyle}
               />
-              <div style={{ textAlign: 'center', fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+              <div className="info-text" style={{ textAlign: 'center' }}>
                 Letters and numbers only, 3–12 characters
               </div>
-              {error && <div className="error-message" style={{ textAlign: 'center', fontSize: '0.85rem' }}>{error}</div>}
-              <button type="submit" className="primary" style={{ width: '100%' }} disabled={!nameValid || loading}>
+              {error && <div className="error-message">{error}</div>}
+              <button type="submit" className="primary full-width" disabled={!nameValid || loading}>
                 {loading ? <span className="spinner" /> : 'Continue'}
               </button>
             </form>
@@ -223,37 +212,25 @@ export default function SetupProfile({ onAuthComplete }) {
 
           {/* ── Play: backup prompt ─────────────────────────────────────── */}
           {step === 'prompt' && (
-            <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '1.25rem', alignItems: 'stretch' }}>
-              <div style={{
-                background: 'rgba(255,255,255,0.04)',
-                border: '1px solid rgba(255,255,255,0.1)',
-                borderRadius: '18px',
-                padding: '1.5rem',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: '0.75rem',
-                textAlign: 'center',
-                width: '100%',
-                boxSizing: 'border-box'
-              }}>
-                <div style={{ fontSize: '2.5rem' }}>🔒</div>
+            <div className="card-stack">
+              <div className="prompt-card">
+                <div className="icon-large">🔒</div>
                 <div style={{ fontWeight: 700, fontSize: '1rem', color: 'var(--text-main)' }}>
                   Back up your account
                 </div>
-                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.6, textAlign: 'justify' }}>
+                <div className="info-text" style={{ textAlign: 'justify' }}>
                   Your account is saved on this browser only. If you clear your cache or switch devices, you'll lose all your account data.
                 </div>
-                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.6, textAlign: 'justify' }}>
+                <div className="info-text" style={{ textAlign: 'justify' }}>
                   Link an email to secure your account and restore it from any device.
                 </div>
               </div>
-              {error && <div className="error-message" style={{ textAlign: 'center', fontSize: '0.85rem' }}>{error}</div>}
-              <div style={{ display: 'flex', gap: '0.75rem', width: '100%', boxSizing: 'border-box' }}>
-                <button style={{ flex: 1, whiteSpace: 'nowrap', boxSizing: 'border-box', padding: '0.75rem 0' }} onClick={handleSkip} disabled={loading}>
-                  Skip for now
+              {error && <div className="error-message">{error}</div>}
+              <div style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
+                <button style={{ flex: 1 }} onClick={handleSkip} disabled={loading}>
+                  Skip
                 </button>
-                <button className="primary" style={{ flex: 1, whiteSpace: 'nowrap', boxSizing: 'border-box', padding: '0.75rem 0' }} onClick={() => go('link')} disabled={loading}>
+                <button className="primary" style={{ flex: 1 }} onClick={() => go('link')} disabled={loading}>
                   Link Account
                 </button>
               </div>
@@ -262,9 +239,11 @@ export default function SetupProfile({ onAuthComplete }) {
 
           {/* ── Play: enter email to link ───────────────────────────────── */}
           {step === 'link' && (
-            <form onSubmit={handleSendLink} style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            <form onSubmit={handleSendLink} className="card-stack" style={{ gap: '0.75rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
-                <button type="button" onClick={() => go('prompt')} className="back-nav-btn">‹</button>
+                <button type="button" onClick={() => go('prompt')} className="back-nav-btn">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                </button>
                 <span style={{ fontWeight: 700, color: 'var(--text-main)' }}>Link your email</span>
               </div>
               <input
@@ -273,12 +252,12 @@ export default function SetupProfile({ onAuthComplete }) {
                 onChange={(e) => { setError(null); setEmail(e.target.value); }}
                 placeholder="email@example.com"
                 autoFocus
-                style={{ ...inputStyle, fontSize: '1rem', textTransform: 'none' }}
+                className="glass-input no-transform"
               />
-              <div style={{ textAlign: 'center', fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                We'll send a one-tap magic link — no password needed.
+              <div className="info-text" style={{ textAlign: 'center' }}>
+                We'll email you a one-tap link.
               </div>
-              {error && <div className="error-message" style={{ textAlign: 'center', fontSize: '0.85rem' }}>{error}</div>}
+              {error && <div className="error-message">{error}</div>}
               <div style={{ display: 'flex', gap: '0.75rem' }}>
                 <button type="button" style={{ flex: 1 }} onClick={() => go('prompt')} disabled={loading}>Back</button>
                 <button type="submit" className="primary" style={{ flex: 2 }} disabled={loading || !email}>
@@ -290,27 +269,17 @@ export default function SetupProfile({ onAuthComplete }) {
 
           {/* ── Sent: check your email ──────────────────────────────────── */}
           {step === 'sent' && (
-            <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-              <div style={{
-                background: 'rgba(255,255,255,0.04)',
-                border: '1px solid rgba(255,255,255,0.1)',
-                borderRadius: '18px',
-                padding: '1.5rem',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: '0.75rem',
-                textAlign: 'center',
-              }}>
-                <div style={{ fontSize: '2.5rem' }}>✉️</div>
+            <div className="card-stack">
+              <div className="prompt-card">
+                <div className="icon-large">✉️</div>
                 <div style={{ fontWeight: 700, fontSize: '1rem', color: 'var(--text-main)' }}>
                   Check your email
                 </div>
-                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.6, textAlign: 'center' }}>
+                <div className="info-text" style={{ textAlign: 'center' }}>
                   A sign-in link was sent to<br />
                   <strong style={{ color: 'var(--text-main)' }}>{email}</strong>
                 </div>
-                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.6, textAlign: 'justify' }}>
+                <div className="info-text" style={{ textAlign: 'justify' }}>
                   {sentMode === 'login'
                     ? 'Click the link in the email to sign in to your account.'
                     : 'Click the link in your inbox to link your account. Check your spam folder if needed.'}
@@ -323,7 +292,7 @@ export default function SetupProfile({ onAuthComplete }) {
                     window.localStorage.removeItem('pendingLinkUid');
                     onAuthComplete(pendingAuth.user, pendingAuth.profileData);
                   }}
-                  style={{ width: '100%' }}
+                  className="full-width"
                 >
                   Enter without linking
                 </button>
@@ -331,14 +300,19 @@ export default function SetupProfile({ onAuthComplete }) {
             </div>
           )}
 
-          <div style={{ width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: '1rem' }}>
-            <div className="util-opt3-pill" style={{ position: 'relative', bottom: 'auto', left: 'auto', transform: 'none' }}>
+          {/* Match Lobby spacing exactly (2.0rem from button content to line) */}
+          <div className="glass-separator" style={{ margin: '0.5rem 0 1rem 0' }} />
+
+          <div className="card-stack" style={{ gap: '0.75rem', alignItems: 'center', marginTop: '-0.5rem' }}>
+            <div className="util-opt3-pill" style={{ margin: 0 }}>
               <button className="util-opt3-btn" onClick={() => setShowSettings(true)} title="Settings">
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
               </button>
             </div>
             <div style={{ textAlign: 'center', marginTop: '0.75rem' }}>
-              <span className="version-text" style={{ position: 'static', opacity: 0.3, fontSize: '0.75rem' }}>v{APP_VERSION}</span>
+              <span className="version-text" style={{ position: 'static', opacity: 0.3, fontSize: '0.75rem' }}>
+                v{APP_VERSION}
+              </span>
             </div>
           </div>
 
@@ -355,9 +329,8 @@ export default function SetupProfile({ onAuthComplete }) {
             </h2>
             <div className="settings-group">
               <label className="settings-label">App Interface</label>
-              <select className="glass-select" value={language} onChange={e => setLanguage(e.target.value)}>
+              <select className="glass-select" value="en" disabled>
                 <option value="en">English</option>
-                <option value="zh-TW">繁體中文</option>
               </select>
             </div>
             <div className="settings-group">

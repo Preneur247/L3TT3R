@@ -6,82 +6,8 @@ import { ref, onValue, set, push, onDisconnect, remove, update } from 'firebase/
 import Lobby from './components/Lobby';
 import GameBoard from './components/GameBoard';
 import SetupProfile from './components/SetupProfile';
+import ResultOverlay from './components/ResultOverlay';
 
-function GameOverPopup({ user, matchData, currentMatchId, setReturnRoomMatchId }) {
-  if (!user || !matchData) return null;
-
-  const isWinner = matchData.winner === user.uid;
-  const isP1 = user.uid === matchData.player1;
-  const myGameWins = isP1 ? (matchData.player1GameWins || 0) : (matchData.player2GameWins || 0);
-  const oppGameWins = isP1 ? (matchData.player2GameWins || 0) : (matchData.player1GameWins || 0);
-  const lastWord = matchData.lastRoundResult?.word;
-  const lastTranslation = matchData.lastRoundResult?.translation;
-
-  const resetMatchState = {
-    state: 'ROOM_SETUP',
-    winner: null,
-    gameOverReason: null,
-    player1Score: 0,
-    player2Score: 0,
-    player1Letter: null,
-    player2Letter: null,
-    player1Pass: null,
-    player2Pass: null,
-    player1Role: null,
-    player2Role: null,
-    startLetter: null,
-    endLetter: null,
-    roundStartTime: null,
-    currentRound: null,
-    lastRoundResult: null,
-    minWordLength: null,
-    winTarget: null,
-  };
-
-  const handlePlayAgain = async () => {
-    setReturnRoomMatchId(currentMatchId);
-    const matchRef = ref(db, `matches/${currentMatchId}`);
-    await update(matchRef, resetMatchState);
-  };
-
-  const handleBackToRoom = async () => {
-    setReturnRoomMatchId(currentMatchId);
-    const matchRef = ref(db, `matches/${currentMatchId}`);
-    await update(matchRef, resetMatchState);
-  };
-
-  return (
-    <div className="popup-overlay">
-      <div className={`translation-popup ${isWinner ? '' : 'loss'}`}>
-        <div className={`popup-title ${isWinner ? 'win' : 'loss'}`}>
-          {isWinner ? 'VICTORY' : 'DEFEAT'}
-        </div>
-
-        {lastWord && (
-          <div className="word-block">
-            <div className="word">{lastWord}</div>
-            {lastTranslation ? (
-              <div className="chinese">{lastTranslation}</div>
-            ) : (
-              <div className="translation-loading">
-                <span className="spinner" /> Translating...
-              </div>
-            )}
-          </div>
-        )}
-
-        <div className="popup-score">
-          <span className="info-chip">Games {myGameWins} : {oppGameWins}</span>
-        </div>
-
-        <div className="popup-actions">
-          <button className="primary" onClick={handlePlayAgain}>Play Again</button>
-          <button onClick={handleBackToRoom}>Back to Room</button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function App() {
   const [user, setUser] = useState(null);
@@ -183,7 +109,7 @@ function App() {
           // Restore profile via claimed_usernames → original uid → users/{uid}
           // Covers first-time Link Account (uid changed after signOut) and cross-device
           if (pendingUsername) {
-            const cleanName = pendingUsername.toLowerCase().replace(/[^a-z0-9]/g, '');
+            const cleanName = pendingUsername.trim().replace(/[^a-zA-Z0-9]/g, '');
             const claimSnap = await getDoc(doc(firestore, 'claimed_usernames', cleanName));
             if (claimSnap.exists()) {
               const originalUid = claimSnap.data().uid;
@@ -191,7 +117,9 @@ function App() {
               if (profileSnap.exists()) {
                 const profileData = { ...profileSnap.data(), email: finalUser.email };
                 await setDoc(doc(firestore, 'users', finalUser.uid), profileData);
-                await setDoc(doc(firestore, 'claimed_usernames', cleanName), { uid: finalUser.uid }, { merge: true });
+                await setDoc(doc(firestore, 'claimed_usernames', cleanName), { 
+                  uid: finalUser.uid
+                }, { merge: true });
                 if (originalUid !== finalUser.uid) {
                   await deleteDoc(doc(firestore, 'users', originalUid));
                 }
@@ -242,11 +170,11 @@ function App() {
 
       setMatchData(data);
 
-      if (data.winner) {
+      if (data.winnerId) {
         setGameState('GAME_OVER');
-      } else if (data.state === 'PICKING_LETTERS' || data.state === 'GUESSING' || data.state === 'ENDED_ROUND') {
+      } else if (data.matchState === 'PICKING_LETTERS' || data.matchState === 'GUESSING' || data.matchState === 'ENDED_ROUND') {
         setGameState('PLAYING');
-      } else if (data.state === 'ROOM_SETUP' || data.state === 'WAITING') {
+      } else if (data.matchState === 'ROOM_SETUP' || data.matchState === 'WAITING') {
         // These states should show the Lobby with the matching Modal open
         setGameState('LOBBY');
       } else {
@@ -300,12 +228,70 @@ function App() {
         )}
       </div>
 
-      {gameState === 'GAME_OVER' && (
-        <GameOverPopup
-          user={user}
-          matchData={matchData}
-          currentMatchId={currentMatchId}
-          setReturnRoomMatchId={setReturnRoomMatchId}
+      {gameState === 'GAME_OVER' && matchData && (
+        <ResultOverlay
+          isOpen={true}
+          isWinner={matchData.winnerId === user.uid}
+          title={matchData.winnerId === user.uid ? 'VICTORY' : 'DEFEAT'}
+          word={matchData.lastRoundResult?.word}
+          translation={matchData.lastRoundResult?.translation}
+          actions={[
+            {
+              label: 'Play Again',
+              isPrimary: true,
+              onClick: async () => {
+                setReturnRoomMatchId(currentMatchId);
+                const matchRef = ref(db, `matches/${currentMatchId}`);
+                await update(matchRef, {
+                  matchState: 'ROOM_SETUP',
+                  winnerId: null,
+                  gameOverReason: null,
+                  player1Score: 0,
+                  player2Score: 0,
+                  player1Letter: null,
+                  player2Letter: null,
+                  player1Pass: null,
+                  player2Pass: null,
+                  player1Role: null,
+                  player2Role: null,
+                  startLetter: null,
+                  endLetter: null,
+                  roundStartTime: null,
+                  currentRound: null,
+                  lastRoundResult: null,
+                  minWordLength: null,
+                  winTarget: null,
+                });
+              }
+            },
+            {
+              label: 'Back to Room',
+              onClick: async () => {
+                setReturnRoomMatchId(currentMatchId);
+                const matchRef = ref(db, `matches/${currentMatchId}`);
+                await update(matchRef, {
+                  matchState: 'ROOM_SETUP',
+                  winnerId: null,
+                  gameOverReason: null,
+                  player1Score: 0,
+                  player2Score: 0,
+                  player1Letter: null,
+                  player2Letter: null,
+                  player1Pass: null,
+                  player2Pass: null,
+                  player1Role: null,
+                  player2Role: null,
+                  startLetter: null,
+                  endLetter: null,
+                  roundStartTime: null,
+                  currentRound: null,
+                  lastRoundResult: null,
+                  minWordLength: null,
+                  winTarget: null,
+                });
+              }
+            }
+          ]}
         />
       )}
     </>

@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import { ref, update, onValue, get } from 'firebase/database';
 import { doc, getDoc, setDoc, increment } from 'firebase/firestore';
 import { db, firestore } from '../firebase';
+import SetupProfile from './SetupProfile';
+import ResultOverlay from './ResultOverlay';
 
 function getTimerClass(seconds) {
   if (seconds > 30) return 'safe';
@@ -10,13 +12,13 @@ function getTimerClass(seconds) {
   return 'danger';
 }
 
-const getTranslation = async (word) => {
+const getTranslation = async (word, targetLang = 'zh-TW') => {
   try {
-    const res = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-TW&dt=t&q=${word}`);
+    const res = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${targetLang}&dt=t&q=${word}`);
     const data = await res.json();
     return data[0][0][0];
   } catch (e) {
-    return "翻譯不可用";
+    return targetLang.startsWith('zh') ? "翻譯不可用" : "Translation unavailable";
   }
 };
 
@@ -36,7 +38,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
 
   const [oppUsername, setOppUsername] = useState('Opp');
 
-  const isP1 = user.uid === matchData.player1;
+  const isP1 = user.uid === matchData.player1Id;
   const myRole = isP1 ? matchData.player1Role : matchData.player2Role;
   const myLetter = isP1 ? matchData.player1Letter : matchData.player2Letter;
   const oppLetter = isP1 ? matchData.player2Letter : matchData.player1Letter;
@@ -50,12 +52,12 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
 
   // Fetch opponent username
   useEffect(() => {
-    const oppUid = isP1 ? matchData.player2 : matchData.player1;
+    const oppUid = isP1 ? matchData.player2Id : matchData.player1Id;
     if (!oppUid) return;
     getDoc(doc(firestore, 'users', oppUid)).then(snap => {
       if (snap.exists()) setOppUsername(snap.data().username || 'Opp');
     }).catch(() => {});
-  }, [matchData.player1, matchData.player2]);
+  }, [matchData.player1Id, matchData.player2Id]);
 
   // Load Dictionary
   useEffect(() => {
@@ -75,17 +77,16 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
       });
   }, []);
 
-  // Reset local state on next round
   useEffect(() => {
-    if (matchData.state === 'PICKING_LETTERS' || matchData.state === 'SETUP_LENGTH') {
+    if (matchData.matchState === 'PICKING_LETTERS') {
       setWord('');
       setLetter('');
       setErrorMsg('');
     }
-  }, [matchData.state, matchData.currentRound]);
+  }, [matchData.matchState, matchData.currentRound]);
 
   useEffect(() => {
-    if (matchData.state === 'GUESSING' && matchData.roundStartTime) {
+    if (matchData.matchState === 'GUESSING' && matchData.roundStartTime) {
       const interval = setInterval(() => {
         const elapsed = Math.floor((Date.now() - matchData.roundStartTime) / 1000);
         const remaining = Math.max(0, 99 - elapsed);
@@ -97,11 +98,11 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
       }, 1000);
       return () => clearInterval(interval);
     }
-  }, [matchData.state, matchData.roundStartTime]);
+  }, [matchData.matchState, matchData.roundStartTime]);
 
   // System Auto-Generation logic
   useEffect(() => {
-    if (matchData.state === 'PICKING_LETTERS' && matchData.letterMode === 'system' && isP1) {
+    if (matchData.matchState === 'PICKING_LETTERS' && matchData.letterMode === 'system' && isP1) {
       const generateSystemLetters = async () => {
         const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
         const start = chars[Math.floor(Math.random() * chars.length)];
@@ -109,7 +110,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
         
         const matchRef = ref(db, `matches/${matchId}`);
         await update(matchRef, {
-          state: 'GUESSING',
+          matchState: 'GUESSING',
           startLetter: start,
           endLetter: end,
           roundStartTime: Date.now(),
@@ -122,12 +123,12 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
       const timer = setTimeout(generateSystemLetters, 800);
       return () => clearTimeout(timer);
     }
-  }, [matchData.state, matchData.letterMode, isP1, matchId]);
+  }, [matchData.matchState, matchData.letterMode, isP1, matchId]);
 
   const handleTimeout = async () => {
     const matchRef = ref(db, `matches/${matchId}`);
     await update(matchRef, {
-      state: 'ENDED_ROUND',
+      matchState: 'ENDED_ROUND',
       lastRoundResult: { reason: 'timeout', winnerId: null }
     });
   };
@@ -149,7 +150,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
       const data = snapshot.val();
       if (data.player1Letter && data.player2Letter) {
         await update(matchRef, {
-          state: 'GUESSING',
+          matchState: 'GUESSING',
           startLetter: data.player1Role === 'START' ? data.player1Letter : data.player2Letter,
           endLetter: data.player1Role === 'END' ? data.player1Letter : data.player2Letter,
           roundStartTime: Date.now()
@@ -193,27 +194,27 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
       player2GameWins: (matchData.player2GameWins || 0) + (!isP1 ? 1 : 0),
     } : {};
 
-    // When a game ends, append an entry to gameHistory keyed by game number
+    // When a game ends, append an entry to game_history keyed by game number
     const gameNumber = (matchData.player1GameWins || 0) + (matchData.player2GameWins || 0) + 1;
     const historyEntry = isGameOver ? {
-      [`gameHistory/${gameNumber}`]: {
-        p1Score: newScores.player1Score,
-        p2Score: newScores.player2Score,
+      [`game_history/${gameNumber}`]: {
+        player1Score: newScores.player1Score,
+        player2Score: newScores.player2Score,
         winnerId: user.uid,
       }
     } : {};
 
     // Build Firestore pair stats update (must be awaited alongside Realtime DB
     // so the data is committed before the user lands back in the room)
-    const pairStatsWrite = (isGameOver && matchData.player2) ? (() => {
-      const sortedUids = [matchData.player1, matchData.player2].sort();
+    const pairStatsWrite = (isGameOver && matchData.player2Id) ? (() => {
+      const sortedUids = [matchData.player1Id, matchData.player2Id].sort();
       const pairKey = sortedUids.join('_');
-      const p1IsFirst = sortedUids[0] === matchData.player1;
-      return setDoc(doc(firestore, 'playerPairStats', pairKey), {
-        p1Uid: sortedUids[0],
-        p2Uid: sortedUids[1],
-        p1TotalScore: increment(p1IsFirst ? newScores.player1Score : newScores.player2Score),
-        p2TotalScore: increment(p1IsFirst ? newScores.player2Score : newScores.player1Score),
+      const p1IsFirst = sortedUids[0] === matchData.player1Id;
+      return setDoc(doc(firestore, 'player_pair_stats', pairKey), {
+        player1Id: sortedUids[0],
+        player2Id: sortedUids[1],
+        player1TotalScore: increment(p1IsFirst ? newScores.player1Score : newScores.player2Score),
+        player2TotalScore: increment(p1IsFirst ? newScores.player2Score : newScores.player1Score),
         gamesPlayed: increment(1),
       }, { merge: true }).catch(err => console.error('pairStats write failed:', err));
     })() : Promise.resolve();
@@ -223,8 +224,8 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
         ...newScores,
         ...gameWinUpdates,
         ...historyEntry,
-        state: isGameOver ? 'GAME_OVER' : 'ENDED_ROUND',
-        winner: isGameOver ? user.uid : null,
+        matchState: isGameOver ? 'GAME_OVER' : 'ENDED_ROUND',
+        winnerId: isGameOver ? user.uid : null,
         lastRoundResult: {
           winnerId: user.uid,
           word: cleanWord,
@@ -236,7 +237,8 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
     ]);
 
     // 2. FETCH TRANSLATION ASYNC
-    const translation = await getTranslation(cleanWord);
+    const targetLang = profile?.settings?.wordTranslationLang || 'zh-TW';
+    const translation = await getTranslation(cleanWord, targetLang);
 
     // 3. UPDATE DB WITH TRANSLATION (Popping in shortly after)
     await update(matchRef, {
@@ -257,7 +259,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
     const data = snapshot.val();
     if (data.player1Pass && data.player2Pass) {
       await update(matchRef, {
-        state: 'ENDED_ROUND',
+        matchState: 'ENDED_ROUND',
         lastRoundResult: { reason: 'pass', winnerId: null }
       });
     }
@@ -269,7 +271,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
     holdingRef.current?.focus();
     const matchRef = ref(db, `matches/${matchId}`);
     await update(matchRef, {
-      state: 'PICKING_LETTERS',
+      matchState: 'PICKING_LETTERS',
       player1Letter: null,
       player2Letter: null,
       player1Pass: null,
@@ -298,7 +300,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
     const p1HasRole = matchData.player1Role === role;
     const letterForRole = p1HasRole ? matchData.player1Letter : matchData.player2Letter;
 
-    if (matchData.state === 'GUESSING') {
+    if (matchData.matchState === 'GUESSING') {
       const revealed = isStart ? matchData.startLetter : matchData.endLetter;
       return {
         content: revealed,
@@ -322,7 +324,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
   const startBox = renderLetterBox('START');
   const endBox = renderLetterBox('END');
 
-  if (matchData.state === 'GAME_OVER') {
+  if (matchData.matchState === 'GAME_OVER') {
     return (
       <div className="game-board" style={{ justifyContent: 'center', alignItems: 'center' }}>
         <h2 className="pulse">Game Over!</h2>
@@ -341,12 +343,12 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
       <div className="scoreboard">
         <div className="score-item">
           <span className="label">{profile?.username || 'You'}</span>
-          <span className={`pass-badge${matchData.state === 'GUESSING' && (isP1 ? matchData.player1Pass : matchData.player2Pass) ? '' : ' pass-badge--hidden'}`}>PASSED</span>
+          <span className={`pass-badge${matchData.matchState === 'GUESSING' && (isP1 ? matchData.player1Pass : matchData.player2Pass) ? '' : ' pass-badge--hidden'}`}>PASSED</span>
           <span className="value">{myScore}</span>
         </div>
         <div className="score-item">
           <span className="label">{oppUsername}</span>
-          <span className={`pass-badge${matchData.state === 'GUESSING' && (!isP1 ? matchData.player1Pass : matchData.player2Pass) ? '' : ' pass-badge--hidden'}`}>PASSED</span>
+          <span className={`pass-badge${matchData.matchState === 'GUESSING' && (!isP1 ? matchData.player1Pass : matchData.player2Pass) ? '' : ' pass-badge--hidden'}`}>PASSED</span>
           <span className="value">{oppScore}</span>
         </div>
       </div>
@@ -365,7 +367,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
       <div className="game-action-area">
         {dictLoading && <div className="dict-loading"><span className="spinner" /> Loading dictionary...</div>}
 
-        {matchData.state === 'PICKING_LETTERS' && (
+        {matchData.matchState === 'PICKING_LETTERS' && (
           <div className="pick-section">
             {matchData.letterMode === 'system' ? (
                <div style={{ textAlign: 'center' }}>
@@ -412,7 +414,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
           </div>
         )}
 
-        {matchData.state === 'GUESSING' && (
+        {matchData.matchState === 'GUESSING' && (
           <>
             <div className={`timer ${getTimerClass(timeLeft)}`}>{timeLeft}</div>
 
@@ -436,36 +438,26 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
       </div>
       </div>
 
-      {matchData.state === 'ENDED_ROUND' && matchData.lastRoundResult && createPortal(
-        <div className="popup-overlay">
-          <div className={`translation-popup ${matchData.lastRoundResult.winnerId === user.uid ? '' : (matchData.lastRoundResult.winnerId ? 'loss' : '')}`}>
-            <div className={`popup-title ${matchData.lastRoundResult.winnerId === user.uid ? 'win' : (matchData.lastRoundResult.winnerId ? 'loss' : '')}`}>
-              {matchData.lastRoundResult.reason === 'correct'
-                ? (matchData.lastRoundResult.winnerId === user.uid ? 'You Won!' : 'Opponent Won!')
-                : `Draw (${matchData.lastRoundResult.reason})`}
-            </div>
-
-            {matchData.lastRoundResult.word && (
-              <div className="word-block">
-                <div className="word">
-                  {matchData.lastRoundResult.word}
-                </div>
-                <div className="chinese">
-                  {matchData.lastRoundResult.translation
-                    ? matchData.lastRoundResult.translation
-                    : <span className="translation-loading"><span className="spinner" /> Translating...</span>
-                  }
-                </div>
-              </div>
-            )}
-
-            <div className="popup-actions">
-              <button className="primary" onClick={nextRound}>Continue &rarr;</button>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
+      <ResultOverlay
+        isOpen={matchData.matchState === 'ENDED_ROUND' && !!matchData.lastRoundResult}
+        isWinner={matchData.lastRoundResult?.winnerId === user.uid}
+        isDraw={!matchData.lastRoundResult?.winnerId && matchData.lastRoundResult?.reason !== 'correct'}
+        reason={matchData.lastRoundResult?.reason}
+        word={matchData.lastRoundResult?.word}
+        translation={matchData.lastRoundResult?.translation}
+        title={
+          matchData.lastRoundResult?.reason === 'correct'
+            ? (matchData.lastRoundResult?.winnerId === user.uid ? 'You Won!' : 'Opponent Won!')
+            : matchData.lastRoundResult?.reason === 'pass' ? 'Draw (Passed)' : 'Draw (Timeout)'
+        }
+        actions={[
+          {
+            label: 'Continue \u2192',
+            isPrimary: true,
+            onClick: nextRound
+          }
+        ]}
+      />
     </div>
   );
 }
