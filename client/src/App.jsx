@@ -7,11 +7,89 @@ import Lobby from './components/Lobby';
 import GameBoard from './components/GameBoard';
 import SetupProfile from './components/SetupProfile';
 
+function GameOverPopup({ user, matchData, currentMatchId, setReturnRoomMatchId }) {
+  if (!user || !matchData) return null;
+
+  const isWinner = matchData.winner === user.uid;
+  const isP1 = user.uid === matchData.player1;
+  const myGameWins = isP1 ? (matchData.player1GameWins || 0) : (matchData.player2GameWins || 0);
+  const oppGameWins = isP1 ? (matchData.player2GameWins || 0) : (matchData.player1GameWins || 0);
+  const lastWord = matchData.lastRoundResult?.word;
+  const lastTranslation = matchData.lastRoundResult?.translation;
+
+  const resetMatchState = {
+    state: 'ROOM_SETUP',
+    winner: null,
+    gameOverReason: null,
+    player1Score: 0,
+    player2Score: 0,
+    player1Letter: null,
+    player2Letter: null,
+    player1Pass: null,
+    player2Pass: null,
+    player1Role: null,
+    player2Role: null,
+    startLetter: null,
+    endLetter: null,
+    roundStartTime: null,
+    currentRound: null,
+    lastRoundResult: null,
+    minWordLength: null,
+    winTarget: null,
+  };
+
+  const handlePlayAgain = async () => {
+    setReturnRoomMatchId(currentMatchId);
+    const matchRef = ref(db, `matches/${currentMatchId}`);
+    await update(matchRef, resetMatchState);
+  };
+
+  const handleBackToRoom = async () => {
+    setReturnRoomMatchId(currentMatchId);
+    const matchRef = ref(db, `matches/${currentMatchId}`);
+    await update(matchRef, resetMatchState);
+  };
+
+  return (
+    <div className="popup-overlay">
+      <div className={`translation-popup ${isWinner ? '' : 'loss'}`}>
+        <div className={`popup-title ${isWinner ? 'win' : 'loss'}`}>
+          {isWinner ? 'VICTORY' : 'DEFEAT'}
+        </div>
+
+        {lastWord && (
+          <div className="word-block">
+            <div className="word">{lastWord}</div>
+            {lastTranslation ? (
+              <div className="chinese">{lastTranslation}</div>
+            ) : (
+              <div className="translation-loading">
+                <span className="spinner" /> Translating...
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="popup-score">
+          <span className="info-chip">Games {myGameWins} : {oppGameWins}</span>
+        </div>
+
+        <div className="popup-actions">
+          <button className="primary" onClick={handlePlayAgain}>Play Again</button>
+          <button onClick={handleBackToRoom}>Back to Room</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [user, setUser] = useState(null);
   const [gameState, setGameState] = useState('LOBBY'); // LOBBY, MATCHING, PLAYING, GAME_OVER
   const [matchData, setMatchData] = useState(null);
   const [currentMatchId, setCurrentMatchId] = useState(null);
+  // Only set when the user intentionally clicks "Back to Room" — never from currentMatchId directly
+  const [returnRoomMatchId, setReturnRoomMatchId] = useState(null);
 
   const [profile, setProfile] = useState(null);
   // null = not started, 'onboarding' = show onboarding, 'ready' = authenticated
@@ -168,8 +246,10 @@ function App() {
         setGameState('GAME_OVER');
       } else if (data.state === 'PICKING_LETTERS' || data.state === 'GUESSING' || data.state === 'ENDED_ROUND') {
         setGameState('PLAYING');
+      } else if (data.state === 'ROOM_SETUP' || data.state === 'WAITING') {
+        // These states should show the Lobby with the matching Modal open
+        setGameState('LOBBY');
       } else {
-        // WAITING, ROOM_READY, SETUP_LENGTH all stay in LOBBY view so the Modal can show over correctly
         setGameState('LOBBY');
       }
     });
@@ -197,10 +277,22 @@ function App() {
     <>
       <div className="glass-card">
         {/* H1 shown for connecting, matching, and in-game states only */}
-        {gameState !== 'LOBBY' && <h1>L3TT3R</h1>}
+        {(gameState !== 'LOBBY' && gameState !== 'GAME_OVER') && <h1>L3TT3R</h1>}
 
-        {gameState === 'LOBBY' && (
-          <Lobby user={user} profile={profile} setMatchId={setCurrentMatchId} initialMatchId={currentMatchId} />
+        {(gameState === 'LOBBY' || gameState === 'GAME_OVER') && (
+          <Lobby
+            user={user}
+            profile={profile}
+            setMatchId={(mId, data) => {
+              setCurrentMatchId(mId);
+              if (data) {
+                setMatchData(data);
+                setGameState('PLAYING');
+              }
+            }}
+            initialMatchId={returnRoomMatchId || (gameState === 'GAME_OVER' ? currentMatchId : null)}
+            onRoomInitialized={() => setReturnRoomMatchId(null)}
+          />
         )}
 
         {gameState === 'PLAYING' && matchData && (
@@ -208,78 +300,14 @@ function App() {
         )}
       </div>
 
-      {/* Rendered outside glass-card so position:fixed is relative to the
-          viewport, not the glass-card's backdrop-filter stacking context. */}
-      {gameState === 'GAME_OVER' && matchData && (() => {
-        const isWinner = matchData.winner === user.uid;
-        const isP1 = user.uid === matchData.player1;
-        const myGameWins = isP1 ? (matchData.player1GameWins || 0) : (matchData.player2GameWins || 0);
-        const oppGameWins = isP1 ? (matchData.player2GameWins || 0) : (matchData.player1GameWins || 0);
-        const winTarget = matchData.winTarget || 5;
-        const lastWord = matchData.lastRoundResult?.word;
-        const lastTranslation = matchData.lastRoundResult?.translation;
-
-        const resetMatchState = {
-          state: 'ROOM_SETUP',
-          winner: null,
-          gameOverReason: null,
-          player1Score: 0,
-          player2Score: 0,
-          player1Letter: null,
-          player2Letter: null,
-          player1Pass: null,
-          player2Pass: null,
-          player1Role: null,
-          player2Role: null,
-          startLetter: null,
-          endLetter: null,
-          roundStartTime: null,
-          currentRound: null,
-          lastRoundResult: null,
-          minWordLength: null,
-          winTarget: null,
-        };
-
-        const handlePlayAgain = async () => {
-          const matchRef = ref(db, `matches/${currentMatchId}`);
-          await update(matchRef, resetMatchState);
-        };
-
-        const handleBackToRoom = async () => {
-          const matchRef = ref(db, `matches/${currentMatchId}`);
-          await update(matchRef, resetMatchState);
-          // currentMatchId stays set — Lobby picks it up via initialMatchId
-        };
-
-        return (
-          <div className="popup-overlay">
-            <div className={`translation-popup ${isWinner ? '' : 'loss'}`}>
-              <div className={`popup-title ${isWinner ? 'win' : 'loss'}`}>
-                {isWinner ? 'VICTORY' : 'DEFEAT'}
-              </div>
-
-              {lastWord && (
-                <div className="word-block">
-                  <div className="word">{lastWord}</div>
-                  {lastTranslation
-                    ? <div className="chinese">{lastTranslation}</div>
-                    : <div className="translation-loading"><span className="spinner" /> Translating...</div>
-                  }
-                </div>
-              )}
-
-              <div className="popup-score">
-                <span className="info-chip">Games {myGameWins} : {oppGameWins}</span>
-              </div>
-
-              <div className="popup-actions">
-                <button className="primary" onClick={handlePlayAgain}>Play Again</button>
-                <button onClick={handleBackToRoom}>Back to Room</button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
+      {gameState === 'GAME_OVER' && (
+        <GameOverPopup
+          user={user}
+          matchData={matchData}
+          currentMatchId={currentMatchId}
+          setReturnRoomMatchId={setReturnRoomMatchId}
+        />
+      )}
     </>
   );
 }

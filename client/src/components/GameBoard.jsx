@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { ref, update, onValue, get } from 'firebase/database';
-import { doc, getDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, increment } from 'firebase/firestore';
 import { db, firestore } from '../firebase';
 
 function getTimerClass(seconds) {
@@ -193,18 +193,47 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
       player2GameWins: (matchData.player2GameWins || 0) + (!isP1 ? 1 : 0),
     } : {};
 
-    await update(matchRef, {
-      ...newScores,
-      ...gameWinUpdates,
-      state: isGameOver ? 'GAME_OVER' : 'ENDED_ROUND',
-      winner: isGameOver ? user.uid : null,
-      lastRoundResult: {
+    // When a game ends, append an entry to gameHistory keyed by game number
+    const gameNumber = (matchData.player1GameWins || 0) + (matchData.player2GameWins || 0) + 1;
+    const historyEntry = isGameOver ? {
+      [`gameHistory/${gameNumber}`]: {
+        p1Score: newScores.player1Score,
+        p2Score: newScores.player2Score,
         winnerId: user.uid,
-        word: cleanWord,
-        translation: null,
-        reason: 'correct'
       }
-    });
+    } : {};
+
+    // Build Firestore pair stats update (must be awaited alongside Realtime DB
+    // so the data is committed before the user lands back in the room)
+    const pairStatsWrite = (isGameOver && matchData.player2) ? (() => {
+      const sortedUids = [matchData.player1, matchData.player2].sort();
+      const pairKey = sortedUids.join('_');
+      const p1IsFirst = sortedUids[0] === matchData.player1;
+      return setDoc(doc(firestore, 'playerPairStats', pairKey), {
+        p1Uid: sortedUids[0],
+        p2Uid: sortedUids[1],
+        p1TotalScore: increment(p1IsFirst ? newScores.player1Score : newScores.player2Score),
+        p2TotalScore: increment(p1IsFirst ? newScores.player2Score : newScores.player1Score),
+        gamesPlayed: increment(1),
+      }, { merge: true }).catch(err => console.error('pairStats write failed:', err));
+    })() : Promise.resolve();
+
+    await Promise.all([
+      update(matchRef, {
+        ...newScores,
+        ...gameWinUpdates,
+        ...historyEntry,
+        state: isGameOver ? 'GAME_OVER' : 'ENDED_ROUND',
+        winner: isGameOver ? user.uid : null,
+        lastRoundResult: {
+          winnerId: user.uid,
+          word: cleanWord,
+          translation: null,
+          reason: 'correct'
+        }
+      }),
+      pairStatsWrite,
+    ]);
 
     // 2. FETCH TRANSLATION ASYNC
     const translation = await getTranslation(cleanWord);
@@ -292,6 +321,15 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
 
   const startBox = renderLetterBox('START');
   const endBox = renderLetterBox('END');
+
+  if (matchData.state === 'GAME_OVER') {
+    return (
+      <div className="game-board" style={{ justifyContent: 'center', alignItems: 'center' }}>
+        <h2 className="pulse">Game Over!</h2>
+        <p style={{ color: 'var(--text-muted)' }}>Calculating results...</p>
+      </div>
+    );
+  }
 
   return (
     <div>

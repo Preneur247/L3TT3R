@@ -38,5 +38,19 @@ service cloud.firestore {
       allow update: if request.auth != null;
       allow delete: if false;
     }
+
+    // Player Pair Stats — cross-session accumulated points between two players.
+    // Key is {uid1}_{uid2} (sorted). Either player in the pair can read/write.
+    match /playerPairStats/{pairId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && (
+        request.resource.data.p1Uid == request.auth.uid ||
+        request.resource.data.p2Uid == request.auth.uid
+      );
+      allow update: if request.auth != null && (
+        resource.data.p1Uid == request.auth.uid ||
+        resource.data.p2Uid == request.auth.uid
+      );
+    }
   }
 }

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { ref, get, set, update, onDisconnect, onValue, runTransaction, remove } from 'firebase/database';
-import { doc, getDoc } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot } from 'firebase/firestore';
 import { db, firestore } from '../firebase';
 import LinkAccount from './LinkAccount';
 
@@ -25,7 +26,7 @@ const RULES = {
   party: 'Coming Soon',
 };
 
-export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
+export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoomInitialized }) {
   const [mode, setMode] = useState('versus');
   const [letterMode, setLetterMode] = useState('players'); // 'system' | 'players'
   const [status, setStatus] = useState('idle');           // idle | searching | error
@@ -35,7 +36,6 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
   const [joinCodeInput, setJoinCodeInput] = useState('');
   const [joinError, setJoinError] = useState(null);
   const [joining, setJoining] = useState(false);
-  const [showSearchModal, setShowSearchModal] = useState(false);
   const [showRoomModal, setShowRoomModal] = useState(false);
   const [roomPlayers, setRoomPlayers] = useState([]);
   const [matchData, setMatchData] = useState(null); // Local mirror for room setup sync
@@ -43,9 +43,11 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
   const roomListenerRef = useRef(null);
   const roomMatchIdRef = useRef(null);   // mirrors pendingMatchId for cancelRoom cleanup
   const roomCodeRef = useRef(null);      // mirrors roomCode for cancelRoom cleanup
+  const matchDataRef = useRef(null);     // mirrors matchData to detect prev state in listener
   const searchListenerRef = useRef(null);
   const waitingListenerRef = useRef(null);
   const [roomTab, setRoomTab] = useState('room');
+  const [statsView, setStatsView] = useState('session');
   const [copiedCode, setCopiedCode] = useState(false);
   const [showRules, setShowRules] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -53,6 +55,25 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
   const [showLinkModal, setShowLinkModal] = useState(false);
   const [tutorialMode, setTutorialMode] = useState('versus');
   const [language, setLanguage] = useState('en');         // 'en' | 'zh-TW'
+  const [pairStats, setPairStats] = useState(null);
+  const pairStatsUnsubRef = useRef(null);
+
+  // ── Fetch cross-session pair stats when both players are in the room ─────
+  useEffect(() => {
+    const p1 = matchData?.player1;
+    const p2 = matchData?.player2;
+    if (!p1 || !p2) { setPairStats(null); return; }
+
+    if (pairStatsUnsubRef.current) pairStatsUnsubRef.current();
+    const sortedUids = [p1, p2].sort();
+    const pairKey = sortedUids.join('_');
+    pairStatsUnsubRef.current = onSnapshot(
+      doc(firestore, 'playerPairStats', pairKey),
+      snap => setPairStats(snap.exists() ? { ...snap.data(), sortedUids } : null),
+      () => setPairStats(null)
+    );
+    return () => { if (pairStatsUnsubRef.current) pairStatsUnsubRef.current(); };
+  }, [matchData?.player1, matchData?.player2]);
 
   // ── Restore room after Back to Room from game over ───────────────────────
   useEffect(() => {
@@ -67,6 +88,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
       }
     });
     initializeRoomListener(initialMatchId);
+    onRoomInitialized?.();
   }, [initialMatchId]);
 
   // ── Utility Room Functions ───────────────────────────────────────────────
@@ -76,37 +98,40 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
 
     const unsub = onValue(matchRef, async (snap) => {
       const data = snap.val();
+
       if (!data) {
-        // Room was deleted by host
-        unsub();
-        roomListenerRef.current = null;
-        setShowRoomModal(false);
-        setMatchData(null);
-        setPendingMatchId(null);
-        setRoomPlayers([]);
+        // Only treat null as a deletion if we've already had data for this room.
+        // This prevents the modal from "flashing" or closing immediately on the
+        // very first snapshot if the cloud write hasn't propagated yet.
+        if (roomMatchIdRef.current === mId && matchDataRef.current) {
+          unsub();
+          roomListenerRef.current = null;
+          setShowRoomModal(false);
+          setMatchData(null);
+          setPendingMatchId(null);
+          setRoomPlayers([]);
+        }
         return;
       }
 
       setMatchData(data);
+      matchDataRef.current = data;
       setRoomSettings({
         minWordLength: data.minWordLength || 3,
         winTarget: data.winTarget || 5
       });
       if (data.letterMode) setLetterMode(data.letterMode);
 
-      // Handle transition from Search to Room when player found
-      if (data.state === 'ROOM_SETUP') {
-        setShowSearchModal(false);
+      if (data.state === 'ROOM_SETUP' || (data.state === 'WAITING' && data.player1 === user.uid)) {
         setShowRoomModal(true);
+        setPendingMatchId(mId);
       }
 
-      // Transition to game if host started it
+      // Transition to game — hand off matchId + data so App.jsx renders immediately
       if (data.state === 'PICKING_LETTERS') {
         unsub();
         roomListenerRef.current = null;
-        setShowRoomModal(false);
-        setRoomPlayers([]);
-        setMatchId(mId);
+        setMatchId(mId, data);
         return;
       }
 
@@ -138,6 +163,19 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
     if (!pendingMatchId || user.uid !== matchData?.player1) return;
     try {
       await update(ref(db, `matches/${pendingMatchId}`), { [key]: val });
+      if (key === 'isPublic') {
+        const publicRef = ref(db, `lobby/public_waiting/${mode}/${pendingMatchId}`);
+        if (val) {
+          // Verify we aren't already full before listing publicly
+          if (!matchData.player2) {
+            await set(publicRef, true);
+            onDisconnect(publicRef).remove();
+          }
+        } else {
+          await remove(publicRef);
+          await onDisconnect(publicRef).cancel();
+        }
+      }
     } catch (err) {
       console.error('Update setting error:', err);
     }
@@ -166,10 +204,13 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
       if (mId) {
         const matchRef = ref(db, `matches/${mId}`);
         const codeRef = ref(db, `room_codes/${mCode}`);
+        const publicRef = ref(db, `lobby/public_waiting/${mode}/${mId}`);
         await onDisconnect(matchRef).cancel();
         if (mCode) await onDisconnect(codeRef).cancel();
+        await onDisconnect(publicRef).cancel();
         await remove(matchRef);
         if (mCode) await remove(codeRef);
+        await remove(publicRef);
       }
     } catch (err) {
       console.error('Cancel room error:', err);
@@ -177,6 +218,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
     setPendingMatchId(null);
     setRoomCode(null);
     setMatchData(null);
+    matchDataRef.current = null;
   };
 
   const startGame = async () => {
@@ -189,7 +231,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
     roomMatchIdRef.current = null;
     roomCodeRef.current = null;
     try {
-      await update(ref(db, `matches/${mId}`), {
+      const startUpdates = {
         state: 'PICKING_LETTERS',
         player1Score: 0,
         player2Score: 0,
@@ -199,12 +241,12 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
         minWordLength: roomSettings.minWordLength,
         winTarget: roomSettings.winTarget,
         letterMode: letterMode
-      });
-      // Clean up room code index now that the game has started
+      };
+      await update(ref(db, `matches/${mId}`), startUpdates);
+      // Clean up room code index and public pool now that the game has started
       if (mCode) await remove(ref(db, `room_codes/${mCode}`)).catch(() => { });
-      setShowRoomModal(false);
-      setRoomPlayers([]);
-      setMatchId(mId);
+      await remove(ref(db, `lobby/public_waiting/${mode}/${mId}`)).catch(() => { });
+      setMatchId(mId, { ...matchData, ...startUpdates });
     } catch (err) {
       console.error('Start game error:', err);
     }
@@ -223,16 +265,48 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
       }
       const matchId = codeSnap.val();
       const matchRef = ref(db, `matches/${matchId}`);
-      const matchSnap = await get(matchRef);
-      if (!matchSnap.exists() || matchSnap.val().state !== 'WAITING') {
+
+      // Pre-fetch the match data to pop the local cache and prevent
+      // transaction aborts due to initial null state.
+      await get(matchRef);
+
+      const result = await runTransaction(matchRef, (current) => {
+        // If the transaction starts with null, return null to tell Firebase
+        // to continue the transaction until it has the server data.
+        if (current === null) return current;
+
+        if (current.state === 'WAITING' && !current.player2) {
+          current.player2 = user.uid;
+          current.state = 'ROOM_SETUP';
+          current.player1Score = 0;
+          current.player2Score = 0;
+          current.player1GameWins = 0;
+          current.player2GameWins = 0;
+          return current;
+        }
+        return; // Abort transaction if conditions not met
+      });
+
+      if (!result.committed) {
         setJoinError('This room is no longer available.');
         return;
       }
-      // Join as P2 — wait for host to start (ROOM_SETUP)
-      await update(matchRef, { player2: user.uid, state: 'ROOM_SETUP', player1Score: 0, player2Score: 0, player1GameWins: 0, player2GameWins: 0 });
+
+      const matchInfo = result.snapshot.val();
+      if (!matchInfo) {
+        setJoinError('Could not retrieve room details. Please try again.');
+        return;
+      }
+
+      // If it was public, remove it from registry
+      if (matchInfo.isPublic) {
+        await remove(ref(db, `lobby/public_waiting/${matchInfo.mode || 'versus'}/${matchId}`)).catch(() => { });
+      }
+
       setShowJoinModal(false);
       setJoinCodeInput('');
       setPendingMatchId(matchId);
+      roomMatchIdRef.current = matchId;
       initializeRoomListener(matchId);
       setShowRoomModal(true);
     } catch (err) {
@@ -243,96 +317,65 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
     }
   };
 
-  // ── Versus: find or create public match ──────────────────────────────────
   const findMatch = async () => {
-    setShowSearchModal(true);
+    setStatus('searching');
     try {
-      const lobbyRef = ref(db, 'lobby/public_waiting/versus');
-      const newMatchId = `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      let transactionResult = { action: null, matchId: null };
+      // 1. First, look for an existing public room
+      const publicWaitingRef = ref(db, `lobby/public_waiting/${mode}`);
+      const snap = await get(publicWaitingRef);
 
-      const txResult = await runTransaction(lobbyRef, (currentVal) => {
-        if (currentVal) {
-          transactionResult = { action: 'join', matchId: currentVal };
-          return null;
+      if (snap.exists()) {
+        const waitingRooms = snap.val();
+        const matchIds = Object.keys(waitingRooms);
+
+        // Try to join rooms until one works
+        for (const mId of matchIds) {
+          const matchRef = ref(db, `matches/${mId}`);
+
+          // Pre-fetch to avoid transaction aborts on initial null
+          await get(matchRef);
+
+          const result = await runTransaction(matchRef, (current) => {
+            if (current === null) return current;
+            if (current.state === 'WAITING' && !current.player2) {
+              current.player2 = user.uid;
+              current.state = 'ROOM_SETUP';
+              current.player1Score = 0;
+              current.player2Score = 0;
+              current.player1GameWins = 0;
+              current.player2GameWins = 0;
+              return current;
+            }
+            return;
+          });
+
+          if (result.committed) {
+            // Successfully joined an existing room!
+            await remove(ref(db, `lobby/public_waiting/${mode}/${mId}`)).catch(() => { });
+            setPendingMatchId(mId);
+            roomMatchIdRef.current = mId;
+            initializeRoomListener(mId);
+            setRoomTab('room');
+            setShowRoomModal(true);
+            setStatus('idle');
+            return;
+          }
         }
-        transactionResult = { action: 'create', matchId: newMatchId };
-        return newMatchId;
-      });
-
-      if (!txResult.committed) {
-        setStatus('error');
-        setTimeout(() => setStatus('idle'), 3000);
-        return;
       }
 
-      if (transactionResult.action === 'join') {
-        // Slot found — join immediately and hand off
-        const matchRef = ref(db, `matches/${transactionResult.matchId}`);
-        const snap = await get(matchRef);
-        if (!snap.exists() || snap.val().state !== 'WAITING') {
-          setShowSearchModal(false);
-          return;
-        }
-        await update(matchRef, {
-          player2: user.uid,
-          state: 'ROOM_SETUP',
-          player1Score: 0,
-          player2Score: 0,
-          player1GameWins: 0,
-          player2GameWins: 0,
-        });
-        setShowSearchModal(false);
-        setPendingMatchId(transactionResult.matchId);
-        initializeRoomListener(transactionResult.matchId);
-        setRoomTab('room');
-        setShowRoomModal(true);
-      } else {
-        // Created slot — wait for P2 (modal already open)
-        const matchRef = ref(db, `matches/${newMatchId}`);
-        await set(matchRef, {
-          id: newMatchId,
-          player1: user.uid,
-          state: 'WAITING',
-          isPublic: true,
-          player1GameWins: 0,
-          player2GameWins: 0,
-          minWordLength: roomSettings.minWordLength,
-          winTarget: roomSettings.winTarget,
-          letterMode: letterMode
-        });
-        onDisconnect(lobbyRef).set(null);
-        onDisconnect(matchRef).remove();
-        setPendingMatchId(newMatchId);
-        initializeRoomListener(newMatchId);
-      }
+      // 2. If no joinable public room found, create a new PUBLIC room and wait
+      await createRoom(true);
+      setStatus('idle');
     } catch (err) {
       console.error('Find match error:', err);
-      setShowSearchModal(false);
       setStatus('error');
       setTimeout(() => setStatus('idle'), 3000);
     }
   };
 
-  const cancelSearch = async () => {
-    if (searchListenerRef.current) {
-      searchListenerRef.current();
-      searchListenerRef.current = null;
-    }
-    setShowSearchModal(false);
-    try {
-      if (pendingMatchId) {
-        await remove(ref(db, `matches/${pendingMatchId}`));
-        await remove(ref(db, 'lobby/public_waiting/versus'));
-      }
-    } catch (err) {
-      console.error('Cancel search error:', err);
-    }
-    setPendingMatchId(null);
-  };
 
   // ── Versus: create private room ───────────────────────────────────────────
-  const createRoom = async () => {
+  const createRoom = async (isPublic = false) => {
     const code = generateRoomCode();
     const matchId = `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     // Set refs synchronously before any await so cancelRoom always has them
@@ -346,7 +389,8 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
       id: matchId,
       player1: user.uid,
       state: 'WAITING',
-      isPublic: false,
+      isPublic: isPublic,
+      mode: mode,
       player1GameWins: 0,
       player2GameWins: 0,
       roomCode: code,
@@ -356,12 +400,21 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
     };
 
     setMatchData(initialData);
+    matchDataRef.current = initialData;
     setShowRoomModal(true);
     try {
       const matchRef = ref(db, `matches/${matchId}`);
       const codeRef = ref(db, `room_codes/${code}`);
+      const publicRef = ref(db, `lobby/public_waiting/${mode}/${matchId}`);
+
       await set(matchRef, initialData);
       await set(codeRef, matchId);
+
+      if (isPublic) {
+        await set(publicRef, true);
+        onDisconnect(publicRef).remove();
+      }
+
       onDisconnect(matchRef).remove();
       onDisconnect(codeRef).remove();
       setPendingMatchId(matchId);
@@ -387,7 +440,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
       return (
         <div className="action-panel">
           <button className="primary" style={{ width: '100%', marginBottom: '0.75rem', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }} disabled>
-            <span>Solo Blitz</span>
+            <span>Go Solo</span>
             <span style={{ fontSize: '0.75rem', color: 'rgba(255, 255, 255, 0.65)', fontWeight: 'normal', marginTop: '0.2rem' }}>Coming Soon</span>
           </button>
           <div style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
@@ -408,7 +461,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
       return (
         <div className="action-panel">
           <button className="primary" style={{ width: '100%', marginBottom: '0.75rem', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }} disabled>
-            <span>Quick Match</span>
+            <span>Go Party</span>
             <span style={{ fontSize: '0.75rem', color: 'rgba(255, 255, 255, 0.65)', fontWeight: 'normal', marginTop: '0.2rem' }}>Coming Soon</span>
           </button>
           <div style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
@@ -426,7 +479,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
     }
 
     // Versus (default)
-    const anyModalOpen = showSearchModal || showRoomModal || showJoinModal;
+    const anyModalOpen = showRoomModal || showJoinModal;
     return (
       <div className="action-panel">
         {status === 'error' && (
@@ -437,13 +490,18 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
         <button
           className="primary"
           style={{ width: '100%', marginBottom: '0.75rem', padding: '1rem' }}
-          onClick={findMatch}
-          disabled={anyModalOpen}
+          onClick={() => findMatch()}
+          disabled={anyModalOpen || status === 'searching'}
         >
-          Quick Match
+          {status === 'searching' ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.75rem' }}>
+              <span className="spinner" style={{ width: '1.25rem', height: '1.25rem', borderWidth: '2px' }} />
+              Searching...
+            </div>
+          ) : 'Quick Match'}
         </button>
         <div style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
-          <button style={{ flex: 1, padding: '0.75rem 0.5rem' }} onClick={createRoom} disabled={anyModalOpen}>
+          <button style={{ flex: 1, padding: '0.75rem 0.5rem' }} onClick={() => createRoom(false)} disabled={anyModalOpen}>
             Create Room
           </button>
           <button style={{ flex: 1, padding: '0.75rem 0.5rem' }} onClick={() => setShowJoinModal(true)} disabled={anyModalOpen}>
@@ -483,8 +541,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
           z-index: 10;
         }
       `}</style>
-      {/* Stats Modal */}
-      {showStats && (
+      {showStats && createPortal(
         <div className="popup-overlay" onClick={() => setShowStats(false)}>
           <div className="rules-modal" onClick={e => e.stopPropagation()}>
             <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', color: 'var(--glow-color)', marginBottom: '2rem', marginTop: 0 }}>
@@ -516,11 +573,11 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
               <button className="primary" onClick={() => setShowStats(false)}>Close</button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
-      {/* Settings Modal */}
-      {showSettings && (
+      {showSettings && createPortal(
         <div className="popup-overlay" onClick={() => setShowSettings(false)}>
           <div className="rules-modal" onClick={e => e.stopPropagation()}>
             <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', color: 'var(--glow-color)', marginBottom: '2rem', marginTop: 0 }}>
@@ -587,7 +644,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
 
             <div className="settings-group">
               <label className="settings-label">App Interface</label>
-              <select className="glass-select" value={language} onChange={e => setLanguage(e.target.value)}>
+              <select className="glass-select" value={language} onChange={e => setLanguage(e.target.value)} disabled>
                 <option value="en">English</option>
                 <option value="zh-TW">繁體中文</option>
               </select>
@@ -604,11 +661,11 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
               <button className="primary" onClick={() => setShowSettings(false)}>Close</button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
-      {/* Rules Modal */}
-      {showRules && (
+      {showRules && createPortal(
         <div className="popup-overlay" onClick={() => setShowRules(false)}>
           <div className="rules-modal" onClick={e => e.stopPropagation()}>
             <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', color: 'var(--glow-color)', marginBottom: '2rem', marginTop: 0 }}>
@@ -659,11 +716,11 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
                 </div>
               </div>
             ) : (
-              <div style={{ 
-                textAlign: 'center', 
-                fontSize: '2.5rem', 
-                fontWeight: 800, 
-                margin: '4rem 0', 
+              <div style={{
+                textAlign: 'center',
+                fontSize: '2.5rem',
+                fontWeight: 800,
+                margin: '4rem 0',
                 color: 'var(--text-muted)',
                 letterSpacing: '0.05em',
                 textTransform: 'uppercase',
@@ -676,257 +733,306 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
               <button className="primary" onClick={() => setShowRules(false)}>Close</button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Link Account Modal */}
       {showLinkModal && <LinkAccount onClose={() => setShowLinkModal(false)} username={profile?.username} />}
 
-      {/* Quick Match Search Modal */}
-      {showSearchModal && (
-        <div className="popup-overlay">
-          <div className="rules-modal" style={{ textAlign: 'center' }} onClick={e => e.stopPropagation()}>
-            <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1.25rem' }}>
-              <span className="spinner" style={{ width: '2rem', height: '2rem', borderWidth: '3px' }} />
-            </div>
-            <h2 style={{ color: 'var(--glow-color)', marginTop: 0, marginBottom: '0.5rem' }}>Finding a Match</h2>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem', marginBottom: '1.75rem' }}>
-              Searching for an opponent...
-            </p>
-            <button style={{ width: '100%' }} onClick={cancelSearch}>Cancel</button>
-          </div>
-        </div>
-      )}
 
-      {showRoomModal && matchData && (
+      {showRoomModal && createPortal(
         <div className="popup-overlay">
-          <div className="rules-modal" onClick={e => e.stopPropagation()} style={{ maxHeight: '90dvh', display: 'flex', flexDirection: 'column' }}>
-            <div style={{ overflowY: 'auto', flex: 1 }}>
-              <h2 style={{ color: 'var(--glow-color)', marginBottom: '1.25rem', marginTop: 0, fontSize: '1.75rem', textAlign: 'center' }}>
-                Game Room
-              </h2>
-
-              <div className="tags-row" style={{ marginBottom: '1.25rem' }}>
-                <span className="badge-tag badge-versus">Versus Mode</span>
-                <span className={`badge-tag ${matchData.isPublic ? 'badge-public' : 'badge-private'}`}>
-                  {matchData.isPublic ? 'Public' : 'Private'}
-                </span>
+          {!matchData ? (
+            <div className="rules-modal" style={{ textAlign: 'center', padding: '3rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1.5rem' }}>
+                <span className="spinner" style={{ width: '2.5rem', height: '2.5rem' }} />
               </div>
+              <h2 style={{ color: 'var(--glow-color)', marginBottom: '0.5rem' }}>Entering Room...</h2>
+              <p style={{ color: 'var(--text-muted)' }}>Fetching match details</p>
+              <button className="secondary" style={{ marginTop: '2rem', width: '100%' }} onClick={cancelRoom}>
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <div className="rules-modal" onClick={e => e.stopPropagation()} style={{ maxHeight: '90dvh', display: 'flex', flexDirection: 'column' }}>
+              <div style={{ overflowY: 'auto', flex: 1 }}>
+                <h2 style={{ color: 'var(--glow-color)', marginBottom: '1.25rem', marginTop: 0, fontSize: '1.75rem', textAlign: 'center' }}>
+                  Game Room
+                </h2>
 
-              {/* Tab bar */}
-              <div className="game-tabs" style={{ marginBottom: '1.25rem', width: '100%' }}>
-                <button
-                  className={`game-tab${roomTab === 'room' ? ' game-tab-active' : ''}`}
-                  onClick={() => setRoomTab('room')}
-                  style={{ flex: 1 }}
-                >Room</button>
-                {!matchData.isPublic && (
+                <div className="tags-row" style={{ marginBottom: '1.25rem' }}>
+                  <span className="badge-tag badge-versus">Versus Mode</span>
+                  <span className={`badge-tag ${matchData.isPublic ? 'badge-public' : 'badge-private'}`}>
+                    {matchData.isPublic ? 'Public' : 'Private'}
+                  </span>
+                </div>
+
+                {/* Tab bar */}
+                <div className="game-tabs" style={{ marginBottom: '1.25rem', width: '100%' }}>
+                  <button
+                    className={`game-tab${roomTab === 'room' ? ' game-tab-active' : ''}`}
+                    onClick={() => setRoomTab('room')}
+                    style={{ flex: 1 }}
+                  >Room</button>
                   <button
                     className={`game-tab${roomTab === 'invite' ? ' game-tab-active' : ''}`}
                     onClick={() => setRoomTab('invite')}
                     style={{ flex: 1 }}
                   >Invite</button>
-                )}
-                <button
-                  className={`game-tab${roomTab === 'setup' ? ' game-tab-active' : ''}`}
-                  onClick={() => setRoomTab('setup')}
-                  style={{ flex: 1 }}
-                >Setup</button>
-              </div>
+                  <button
+                    className={`game-tab${roomTab === 'setup' ? ' game-tab-active' : ''}`}
+                    onClick={() => setRoomTab('setup')}
+                    style={{ flex: 1 }}
+                  >Setup</button>
+                </div>
 
-              {/* Room tab */}
-              {roomTab === 'room' && (() => {
-                const gameWinsByUid = {
-                  [matchData.player1]: matchData.player1GameWins || 0,
-                  ...(matchData.player2 ? { [matchData.player2]: matchData.player2GameWins || 0 } : {}),
-                };
-                const totalGameWins = Object.values(gameWinsByUid).reduce((s, v) => s + v, 0);
-                return (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
-                    {/* Players with count */}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <label className="settings-label" style={{ marginBottom: 0 }}>Players</label>
-                      <span style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--glow-color)' }}>{roomPlayers.length}/2</span>
-                    </div>
-                    <div className="room-player-slot filled">
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                      <span className="room-player-name">{roomPlayers[0]?.username || 'Host'}</span>
-                      <span className="room-player-badge">Host</span>
-                    </div>
-                    <div className={`room-player-slot ${roomPlayers[1] ? 'filled' : 'waiting'}`}>
-                      {roomPlayers[1] ? (
-                        <>
-                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                          <span className="room-player-name">{roomPlayers[1].username}</span>
-                        </>
-                      ) : (
-                        <>
-                          <span className="spinner" style={{ width: '1.2rem', height: '1.2rem', opacity: 0.5, flexShrink: 0 }} />
-                          <span className="room-player-name" style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontWeight: 500 }}>Waiting...</span>
-                        </>
-                      )}
-                    </div>
-
-                    {/* Series record — shown when at least one game has been played */}
-                    {totalGameWins > 0 && (
-                      <div className="room-series">
-                        <div className="room-series-label">Series</div>
-                        {roomPlayers.length === 2 ? (
-                          /* Versus layout: NAME  W – W  NAME */
-                          <div className="room-series-versus">
-                            <span className="room-series-name">{roomPlayers[0].username}</span>
-                            <span className="room-series-score">
-                              {gameWinsByUid[roomPlayers[0].uid]}
-                              <span className="room-series-sep">–</span>
-                              {gameWinsByUid[roomPlayers[1].uid]}
-                            </span>
-                            <span className="room-series-name right">{roomPlayers[1].username}</span>
-                          </div>
+                {/* Room tab */}
+                {roomTab === 'room' && (() => {
+                  const gameWinsByUid = {
+                    [matchData.player1]: matchData.player1GameWins || 0,
+                    ...(matchData.player2 ? { [matchData.player2]: matchData.player2GameWins || 0 } : {}),
+                  };
+                  const totalGameWins = Object.values(gameWinsByUid).reduce((s, v) => s + v, 0);
+                  return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
+                      {/* Players with count */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <label className="settings-label" style={{ marginBottom: 0 }}>Players</label>
+                        <span style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--glow-color)' }}>{roomPlayers.length}/2</span>
+                      </div>
+                      <div className="room-player-slot filled">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                        <span className="room-player-name">{roomPlayers[0]?.username || 'Host'}</span>
+                        <span className="room-player-badge">Host</span>
+                      </div>
+                      <div className={`room-player-slot ${roomPlayers[1] ? 'filled' : 'waiting'}`}>
+                        {roomPlayers[1] ? (
+                          <>
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                            <span className="room-player-name">{roomPlayers[1].username}</span>
+                          </>
                         ) : (
-                          /* Party layout: ranked list */
-                          [...roomPlayers]
-                            .sort((a, b) => (gameWinsByUid[b.uid] || 0) - (gameWinsByUid[a.uid] || 0))
-                            .map((p, i) => (
-                              <div key={p.uid} className="room-series-row">
-                                <span className="room-series-rank">{i + 1}</span>
-                                <span className="room-series-name">{p.username}</span>
-                                <span className="room-series-wins">{gameWinsByUid[p.uid] || 0} W</span>
-                              </div>
-                            ))
+                          <>
+                            <span className="spinner" style={{ width: '1.2rem', height: '1.2rem', opacity: 0.5, flexShrink: 0 }} />
+                            <span className="room-player-name" style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontWeight: 500 }}>Waiting...</span>
+                          </>
                         )}
                       </div>
-                    )}
-                  </div>
-                );
-              })()}
 
-              {/* Invite tab — private rooms only */}
-              {roomTab === 'invite' && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem' }}>
-                  <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'center', margin: 0 }}>
-                    Share this code with a friend to invite them to your room.
-                  </p>
-                  <div
-                    className="room-code-section copyable"
-                    onClick={copyRoomCode}
-                  >
-                    <div className="label">Room Code</div>
-                    <div className="code">{matchData.roomCode}</div>
-                    <div className={`room-code-hint${copiedCode ? ' copied' : ''}`}>
-                      {copiedCode ? '✓ Copied!' : 'Tap to copy'}
-                    </div>
-                  </div>
-                </div>
-              )}
+                      {/* Stats card — tap anywhere to switch session ↔ all-time */}
+                      {roomPlayers.length === 2 && (matchData.gameHistory || pairStats) && (() => {
+                        const sessionScores = matchData.gameHistory ? (() => {
+                          const games = Object.values(matchData.gameHistory);
+                          return { p1: games.reduce((s, g) => s + g.p1Score, 0), p2: games.reduce((s, g) => s + g.p2Score, 0) };
+                        })() : null;
 
-              {/* Setup tab */}
-              {roomTab === 'setup' && (
-                <div style={{ marginBottom: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-                  <div className="settings-group" style={{ marginBottom: 0 }}>
-                    <label className="settings-label">Letter Selection</label>
-                    <div className="game-tabs" style={{ width: '100%', marginBottom: 0 }}>
-                      <button
-                        className={`game-tab${matchData.letterMode === 'system' ? ' game-tab-active' : ''}`}
-                        onClick={() => updateRoomSetting('letterMode', 'system')}
-                        disabled={user.uid !== matchData.player1}
-                        style={{ flex: 1 }}
-                      >System</button>
-                      <button
-                        className={`game-tab${matchData.letterMode === 'players' ? ' game-tab-active' : ''}`}
-                        onClick={() => updateRoomSetting('letterMode', 'players')}
-                        disabled={user.uid !== matchData.player1}
-                        style={{ flex: 1 }}
-                      >Players</button>
-                    </div>
-                  </div>
+                        const allTimeScores = pairStats ? (() => {
+                          const p1IsFirst = pairStats.p1Uid === matchData.player1;
+                          return {
+                            p1: p1IsFirst ? pairStats.p1TotalScore : pairStats.p2TotalScore,
+                            p2: p1IsFirst ? pairStats.p2TotalScore : pairStats.p1TotalScore,
+                            games: pairStats.gamesPlayed,
+                          };
+                        })() : null;
 
-                  <div className="settings-group" style={{ marginBottom: 0 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                      <label className="settings-label" style={{ marginBottom: 0 }}>Min Length</label>
-                      <div style={{
-                        background: 'var(--glow-color)',
-                        color: '#000',
-                        fontWeight: 800,
-                        fontSize: '1.1rem',
-                        padding: '0.25rem 0.75rem',
-                        borderRadius: '8px',
-                        minWidth: '40px',
-                        textAlign: 'center'
-                      }}>
-                        {matchData.minWordLength || 3}
-                      </div>
-                    </div>
-                    <div style={{ position: 'relative', padding: '0.25rem 0' }}>
-                      <input
-                        type="range"
-                        className="custom-range"
-                        min="3"
-                        max="10"
-                        value={matchData.minWordLength || 3}
-                        onChange={(e) => updateRoomSetting('minWordLength', parseInt(e.target.value))}
-                        disabled={user.uid !== matchData.player1}
-                        style={{
-                          width: '100%',
-                          height: '16px',
-                          background: `linear-gradient(to right, var(--glow-color) ${((matchData.minWordLength || 3) - 3) / 7 * 100}%, rgba(255,255,255,0.15) ${((matchData.minWordLength || 3) - 3) / 7 * 100}%)`,
-                          borderRadius: '8px',
-                          accentColor: 'transparent',
-                          cursor: user.uid !== matchData.player1 ? 'not-allowed' : 'pointer',
-                          appearance: 'none',
-                          WebkitAppearance: 'none'
-                        }}
-                      />
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.5rem' }}>
-                        <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>3</span>
-                        <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>10</span>
-                      </div>
-                    </div>
-                  </div>
+                        const hasBoth = sessionScores && allTimeScores;
+                        const active = hasBoth
+                          ? (statsView === 'session' ? sessionScores : allTimeScores)
+                          : (sessionScores || allTimeScores);
+                        if (!active) return null;
 
-                  <div className="settings-group" style={{ marginBottom: 0 }}>
-                    <label className="settings-label">Target Points</label>
-                    <div className="game-tabs" style={{ width: '100%', marginBottom: 0 }}>
-                      {[5, 10, 20].map(n => (
+                        const isSession = hasBoth ? statsView === 'session' : Boolean(sessionScores);
+                        const label = isSession ? 'This Session' : 'All-Time';
+                        const hint = hasBoth ? (isSession ? 'Tap for all-time' : 'Tap for session') : null;
+
+                        return (
+                          <div
+                            className={`room-series${hasBoth ? ' room-series-tappable' : ''}`}
+                            onClick={hasBoth ? () => setStatsView(v => v === 'session' ? 'alltime' : 'session') : undefined}
+                            style={{ textAlign: 'center' }}
+                          >
+                            <div className="room-series-label" style={{ justifyContent: 'center', marginBottom: '0.5rem' }}>
+                              <span>{label}{!isSession && allTimeScores ? ` · ${allTimeScores.games} game${allTimeScores.games !== 1 ? 's' : ''}` : ''}</span>
+                            </div>
+
+                            <div className="room-series-versus" style={{ marginBottom: hint ? '0.5rem' : 0 }}>
+                              <span className="room-series-name">{roomPlayers[0].username}</span>
+                              <span className="room-series-score">
+                                {active.p1}
+                                <span className="room-series-sep">–</span>
+                                {active.p2}
+                              </span>
+                              <span className="room-series-name right">{roomPlayers[1].username}</span>
+                            </div>
+
+                            {hint && (
+                              <div className="room-series-hint" style={{ opacity: 0.4 }}>
+                                {hint}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  );
+                })()}
+
+                {/* Invite tab */}
+                {roomTab === 'invite' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem' }}>
+                    <div className="settings-group" style={{ marginBottom: 0 }}>
+                      <label className="settings-label">Room Visibility</label>
+                      <div className="game-tabs" style={{ width: '100%', marginBottom: 0 }}>
                         <button
-                          key={n}
-                          className={`game-tab${(matchData.winTarget || 5) === n ? ' game-tab-active' : ''}`}
-                          onClick={() => updateRoomSetting('winTarget', n)}
+                          className={`game-tab${matchData.isPublic ? '' : ' game-tab-active'}`}
+                          onClick={() => updateRoomSetting('isPublic', false)}
                           disabled={user.uid !== matchData.player1}
                           style={{ flex: 1 }}
-                        >{n}</button>
-                      ))}
+                        >Private</button>
+                        <button
+                          className={`game-tab${matchData.isPublic ? ' game-tab-active' : ''}`}
+                          onClick={() => updateRoomSetting('isPublic', true)}
+                          disabled={user.uid !== matchData.player1}
+                          style={{ flex: 1 }}
+                        >Public</button>
+                      </div>
+                      <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.5rem', textAlign: 'center' }}>
+                        {matchData.isPublic
+                          ? 'Anyone can join.'
+                          : 'Only people with the room code can join.'}
+                      </p>
+                    </div>
+
+                    <div className="settings-group" style={{ marginBottom: 0 }}>
+                      <label className="settings-label">Room Code</label>
+                      <div
+                        className="room-code-section copyable"
+                        onClick={copyRoomCode}
+                        style={{ padding: '0.75rem', marginBottom: 0 }}
+                      >
+                        <div className="code" style={{ fontSize: '1.75rem' }}>{matchData.roomCode}</div>
+                        <div className={`room-code-hint${copiedCode ? ' copied' : ''}`}>
+                          {copiedCode ? '✓ Copied!' : 'Tap to copy'}
+                        </div>
+                      </div>
+                      <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.5rem', textAlign: 'center' }}>
+                        Share this code with a friend to invite them to your room.
+                      </p>
                     </div>
                   </div>
-                </div>
-              )}
+                )}
 
-            </div>{/* end scrollable */}
-            <div style={{ display: 'flex', gap: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--glass-border)', flexShrink: 0 }}>
-              <button className="secondary" style={{ flex: 1, padding: '1rem' }} onClick={cancelRoom}>
-                Leave Room
-              </button>
-              {user.uid === matchData.player1 ? (
-                <button
-                  className="primary"
-                  style={{ flex: 1.5, padding: '1rem' }}
-                  onClick={startGame}
-                  disabled={roomPlayers.length < 2}
-                >
-                  Start Game
+                {/* Setup tab */}
+                {roomTab === 'setup' && (
+                  <div style={{ marginBottom: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+
+                    <div className="settings-group" style={{ marginBottom: 0 }}>
+                      <label className="settings-label">Letter Selection</label>
+                      <div className="game-tabs" style={{ width: '100%', marginBottom: 0 }}>
+                        <button
+                          className={`game-tab${matchData.letterMode === 'system' ? ' game-tab-active' : ''}`}
+                          onClick={() => updateRoomSetting('letterMode', 'system')}
+                          disabled={user.uid !== matchData.player1}
+                          style={{ flex: 1 }}
+                        >System</button>
+                        <button
+                          className={`game-tab${matchData.letterMode === 'players' ? ' game-tab-active' : ''}`}
+                          onClick={() => updateRoomSetting('letterMode', 'players')}
+                          disabled={user.uid !== matchData.player1}
+                          style={{ flex: 1 }}
+                        >Players</button>
+                      </div>
+                    </div>
+
+                    <div className="settings-group" style={{ marginBottom: 0 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                        <label className="settings-label" style={{ marginBottom: 0 }}>Min Length</label>
+                        <div style={{
+                          background: 'var(--glow-color)',
+                          color: '#000',
+                          fontWeight: 800,
+                          fontSize: '1.1rem',
+                          padding: '0.25rem 0.75rem',
+                          borderRadius: '8px',
+                          minWidth: '40px',
+                          textAlign: 'center'
+                        }}>
+                          {matchData.minWordLength || 3}
+                        </div>
+                      </div>
+                      <div style={{ position: 'relative', padding: '0.25rem 0' }}>
+                        <input
+                          type="range"
+                          className="custom-range"
+                          min="3"
+                          max="10"
+                          value={matchData.minWordLength || 3}
+                          onChange={(e) => updateRoomSetting('minWordLength', parseInt(e.target.value))}
+                          disabled={user.uid !== matchData.player1}
+                          style={{
+                            width: '100%',
+                            height: '16px',
+                            background: `linear-gradient(to right, var(--glow-color) ${((matchData.minWordLength || 3) - 3) / 7 * 100}%, rgba(255,255,255,0.15) ${((matchData.minWordLength || 3) - 3) / 7 * 100}%)`,
+                            borderRadius: '8px',
+                            accentColor: 'transparent',
+                            cursor: user.uid !== matchData.player1 ? 'not-allowed' : 'pointer',
+                            appearance: 'none',
+                            WebkitAppearance: 'none'
+                          }}
+                        />
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.5rem' }}>
+                          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>3</span>
+                          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>10</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="settings-group" style={{ marginBottom: 0 }}>
+                      <label className="settings-label">Target Points</label>
+                      <div className="game-tabs" style={{ width: '100%', marginBottom: 0 }}>
+                        {[1, 3, 5, 10, 20].map(n => (
+                          <button
+                            key={n}
+                            className={`game-tab${(matchData.winTarget || 5) === n ? ' game-tab-active' : ''}`}
+                            onClick={() => updateRoomSetting('winTarget', n)}
+                            disabled={user.uid !== matchData.player1}
+                            style={{ flex: 1 }}
+                          >{n}</button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+              </div>{/* end scrollable */}
+              <div style={{ display: 'flex', gap: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--glass-border)', flexShrink: 0 }}>
+                <button className="secondary" style={{ flex: 1, padding: '1rem' }} onClick={cancelRoom}>
+                  Leave Room
                 </button>
-              ) : (
-                <div style={{ flex: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(56, 189, 248, 0.05)', border: '1px solid rgba(56, 189, 248, 0.15)', borderRadius: '12px', color: 'var(--text-muted)', fontWeight: 600, fontSize: '0.85rem', padding: '0.5rem', textAlign: 'center' }}>
-                  Waiting for host to begin...
-                </div>
-              )}
+                {user.uid === matchData.player1 ? (
+                  <button
+                    className="primary"
+                    style={{ flex: 1.5, padding: '1rem' }}
+                    onClick={startGame}
+                    disabled={roomPlayers.length < 2}
+                  >
+                    Start Game
+                  </button>
+                ) : (
+                  <div style={{ flex: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(56, 189, 248, 0.05)', border: '1px solid rgba(56, 189, 248, 0.15)', borderRadius: '12px', color: 'var(--text-muted)', fontWeight: 600, fontSize: '0.85rem', padding: '0.5rem', textAlign: 'center' }}>
+                    Waiting for host to begin...
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        </div>
+          )}
+        </div>,
+        document.body
       )}
 
 
-      {/* Join by Code Modal */}
-      {showJoinModal && (
+      {showJoinModal && createPortal(
         <div className="popup-overlay" onClick={() => { setShowJoinModal(false); setJoinCodeInput(''); setJoinError(null); }}>
           <div className="rules-modal" onClick={e => e.stopPropagation()}>
             <h2 style={{ color: 'var(--glow-color)', marginBottom: '1.5rem', marginTop: 0 }}>
@@ -959,7 +1065,16 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId }) {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
+      )}
+
+      {showLinkModal && createPortal(
+        <LinkAccount
+          username={profile?.username || 'Guest'}
+          onClose={() => setShowLinkModal(false)}
+        />,
+        document.body
       )}
 
       <div className="lobby-container">
