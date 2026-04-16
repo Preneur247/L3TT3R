@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { ref, update, onValue, get } from 'firebase/database';
-import { doc, getDoc, setDoc, increment } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, increment } from 'firebase/firestore';
 import { db, firestore } from '../firebase';
 import SetupProfile from './SetupProfile';
 import ResultOverlay from './ResultOverlay';
@@ -204,20 +204,18 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
       }
     } : {};
 
-    // Build Firestore pair stats update (must be awaited alongside Realtime DB
-    // so the data is committed before the user lands back in the room)
-    const pairStatsWrite = (isGameOver && matchData.player2Id) ? (() => {
-      const sortedUids = [matchData.player1Id, matchData.player2Id].sort();
-      const pairKey = sortedUids.join('_');
-      const p1IsFirst = sortedUids[0] === matchData.player1Id;
-      return setDoc(doc(firestore, 'player_pair_stats', pairKey), {
-        player1Id: sortedUids[0],
-        player2Id: sortedUids[1],
-        player1TotalScore: increment(p1IsFirst ? newScores.player1Score : newScores.player2Score),
-        player2TotalScore: increment(p1IsFirst ? newScores.player2Score : newScores.player1Score),
-        gamesPlayed: increment(1),
-      }, { merge: true }).catch(err => console.error('pairStats write failed:', err));
-    })() : Promise.resolve();
+    // Build player stats update for current user
+    const playerStatsWrite = (() => {
+      const mode = matchData.mode || 'versus';
+      const statsRef = doc(firestore, 'users', user.uid);
+      const updates = {
+        'stats.overall.wordsFormed': increment(1),
+        [`stats.${mode}.wordsFormed`]: increment(1),
+        [`words.${cleanWord.toUpperCase()}`]: increment(1)
+      };
+      return updateDoc(statsRef, updates).catch(err => console.error('playerStatsWrite failed:', err));
+    })();
+
 
     await Promise.all([
       update(matchRef, {
@@ -234,6 +232,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
         }
       }),
       pairStatsWrite,
+      playerStatsWrite,
     ]);
 
     // 2. FETCH TRANSLATION ASYNC

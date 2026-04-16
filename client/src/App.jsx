@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { auth, db, firestore } from './firebase';
 import { isSignInWithEmailLink, signInWithEmailLink, signOut } from 'firebase/auth';
-import { doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
-import { ref, onValue, set, push, onDisconnect, remove, update } from 'firebase/database';
+import { doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, getDocs, writeBatch, increment, onSnapshot } from 'firebase/firestore';
+import { ref, onValue, update } from 'firebase/database';
 import Lobby from './components/Lobby';
 import GameBoard from './components/GameBoard';
 import SetupProfile from './components/SetupProfile';
@@ -18,20 +18,27 @@ function App() {
   const [returnRoomMatchId, setReturnRoomMatchId] = useState(null);
 
   const [profile, setProfile] = useState(null);
+  const statsRecordedRef = useRef(null);
+  const profileUnsubRef = useRef(null);
   // null = not started, 'onboarding' = show onboarding, 'ready' = authenticated
   const [authState, setAuthState] = useState('checking');
 
-  const checkAndSetProfile = async (authUser) => {
+  const checkAndSetProfile = (authUser) => {
+    if (profileUnsubRef.current) profileUnsubRef.current();
+    
     const docRef = doc(firestore, 'users', authUser.uid);
-    const docSnap = await getDoc(docRef);
-    if (docSnap.exists()) {
-      setProfile(docSnap.data());
-      setAuthState('ready');
-    } else {
-      // Email-linked user who has no profile yet — show guest name setup
-      setUser(authUser);
-      setAuthState('onboarding');
-    }
+    profileUnsubRef.current = onSnapshot(docRef, (docSnap) => {
+      if (docSnap.exists()) {
+        setProfile(docSnap.data());
+        setAuthState('ready');
+      } else {
+        // Email-linked user who has no profile yet — show guest name setup
+        setUser(authUser);
+        setAuthState('onboarding');
+      }
+    }, (err) => {
+      console.error('Profile listener error:', err);
+    });
   };
 
   useEffect(() => {
@@ -121,6 +128,35 @@ function App() {
                   uid: finalUser.uid
                 }, { merge: true });
                 if (originalUid !== finalUser.uid) {
+                  // Migrate player_pair_stats from originalUid to finalUser.uid
+                  const q1 = query(collection(firestore, 'player_pair_stats'), where('player1Id', '==', originalUid));
+                  const q2 = query(collection(firestore, 'player_pair_stats'), where('player2Id', '==', originalUid));
+                  const [s1, s2] = await Promise.all([getDocs(q1), getDocs(q2)]);
+                  const statsDocs = [...s1.docs, ...s2.docs];
+                  
+                  if (statsDocs.length > 0) {
+                    const batch = writeBatch(firestore);
+                    for (const sDoc of statsDocs) {
+                      const data = sDoc.data();
+                      const otherUid = data.player1Id === originalUid ? data.player2Id : data.player1Id;
+                      const sortedUids = [finalUser.uid, otherUid].sort();
+                      const newPairKey = sortedUids.join('_');
+                      
+                      const oldUserScore = data.player1Id === originalUid ? data.player1TotalScore : data.player2TotalScore;
+                      const otherUserScore = data.player1Id === originalUid ? data.player2TotalScore : data.player1TotalScore;
+                      
+                      batch.set(doc(firestore, 'player_pair_stats', newPairKey), {
+                        player1Id: sortedUids[0],
+                        player2Id: sortedUids[1],
+                        player1TotalScore: increment(sortedUids[0] === finalUser.uid ? oldUserScore : otherUserScore),
+                        player2TotalScore: increment(sortedUids[1] === finalUser.uid ? oldUserScore : otherUserScore),
+                        gamesPlayed: increment(data.gamesPlayed)
+                      }, { merge: true });
+                      batch.delete(sDoc.ref);
+                    }
+                    await batch.commit().catch(err => console.error('Stats migration failed:', err));
+                  }
+
                   await deleteDoc(doc(firestore, 'users', originalUid));
                 }
                 setProfile(profileData);
@@ -152,6 +188,9 @@ function App() {
     };
 
     handleAuth();
+    return () => {
+      if (profileUnsubRef.current) profileUnsubRef.current();
+    };
   }, []);
 
   // Listen to match changes if in a match
@@ -184,6 +223,71 @@ function App() {
 
     return () => unsubscribe();
   }, [currentMatchId]);
+
+  // Record game-over stats once per match
+  useEffect(() => {
+    if (gameState === 'GAME_OVER' && matchData?.winnerId && user?.uid && currentMatchId !== statsRecordedRef.current) {
+      statsRecordedRef.current = currentMatchId;
+      
+      const isWinner = matchData.winnerId === user.uid;
+      const mode = matchData.mode || 'versus';
+      const statsRef = doc(firestore, 'users', user.uid);
+      
+      const updates = {
+        'stats.overall.gamesPlayed': increment(1),
+        [`stats.${mode}.gamesPlayed`]: increment(1),
+        'stats.overall.gamesWon': increment(isWinner ? 1 : 0),
+        [`stats.${mode}.gamesWon`]: increment(isWinner ? 1 : 0),
+      };
+
+      if (isWinner) {
+        const modeStats = profile?.stats?.[mode] || { currentStreak: 0, bestStreak: 0 };
+        const newStreak = (modeStats.currentStreak || 0) + 1;
+        updates[`stats.${mode}.currentStreak`] = newStreak;
+        if (newStreak > (modeStats.bestStreak || 0)) {
+          updates[`stats.${mode}.bestStreak`] = newStreak;
+        }
+      } else {
+        updates[`stats.${mode}.currentStreak`] = 0;
+      }
+
+      updateDoc(statsRef, updates).catch(err => console.error('App.jsx stats update failed:', err));
+    }
+  }, [gameState, matchData, currentMatchId, user?.uid, profile]);
+
+  // Migrate legacy flat stats to new nested structure
+  useEffect(() => {
+    if (authState === 'ready' && profile && user?.uid && profile.stats) {
+      const stats = profile.stats;
+      const needsMigration = !stats.overall || stats.overall.wins !== undefined;
+
+      if (needsMigration) {
+        const migrate = async () => {
+          const gamesPlayed = stats.gamesPlayed || stats.overall?.gamesPlayed || 0;
+          const gamesWon = stats.wins || stats.overall?.wins || stats.overall?.gamesWon || 0;
+          const wordsFormed = stats.wordsFormed || stats.overall?.wordsFormed || 0;
+          const streak = stats.streak || stats.versus?.currentStreak || 0;
+          const bestStreak = stats.versus?.bestStreak || streak;
+
+          const newStats = {
+            overall: { gamesPlayed, gamesWon, wordsFormed },
+            versus: { gamesPlayed, gamesWon, wordsFormed, currentStreak: streak, bestStreak: bestStreak },
+            solo: { gamesPlayed: 0, gamesWon: 0, wordsFormed: 0, currentStreak: 0, bestStreak: 0 },
+            party: { gamesPlayed: 0, gamesWon: 0, wordsFormed: 0, currentStreak: 0, bestStreak: 0 }
+          };
+
+          try {
+            const userRef = doc(firestore, 'users', user.uid);
+            await setDoc(userRef, { stats: newStats }, { merge: true });
+            setProfile(prev => ({ ...prev, stats: newStats }));
+          } catch (err) {
+            console.error('Migration failed:', err);
+          }
+        };
+        migrate();
+      }
+    }
+  }, [authState, profile, user?.uid]);
 
   if (authState === 'checking') {
     return <div className="glass-card"><h1>L3TT3R</h1><div className="subtitle">Connecting...</div></div>;
