@@ -17,3 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - Hardened database security rules to prevent unauthorized data access and modifications.
 - Improved environment configuration management for enhanced security.
+
+## [0.1.0] - 2026-04-16
+### Added
+- Integrated user accounts and statistics tracking.
+- Added support for persistent user profiles and guest account linking.
+- New game modes and lobby configuration options for word length and win targets.
+- Enhanced UI consistency and glassmorphism styling across the app.
