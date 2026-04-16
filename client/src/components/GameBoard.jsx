@@ -1,18 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { ref, update, onValue, get } from 'firebase/database';
-import { db } from '../firebase';
-
-// Simple translation helper (Client-side)
-const getTranslation = async (word) => {
-  try {
-    const res = await fetch(`https://api.mymemory.translated.net/get?q=${word}&langpair=en|zh-TW`);
-    const data = await res.json();
-    return data.responseData.translatedText;
-  } catch (e) {
-    return "翻譯不可用";
-  }
-};
+import { doc, getDoc, setDoc, increment } from 'firebase/firestore';
+import { db, firestore } from '../firebase';
+import SetupProfile from './SetupProfile';
+import ResultOverlay from './ResultOverlay';
 
 function getTimerClass(seconds) {
   if (seconds > 30) return 'safe';
@@ -20,11 +12,22 @@ function getTimerClass(seconds) {
   return 'danger';
 }
 
-export default function GameBoard({ user, matchId, matchData }) {
+const getTranslation = async (word, targetLang = 'zh-TW') => {
+  try {
+    const res = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${targetLang}&dt=t&q=${word}`);
+    const data = await res.json();
+    return data[0][0][0];
+  } catch (e) {
+    return targetLang.startsWith('zh') ? "翻譯不可用" : "Translation unavailable";
+  }
+};
+
+export default function GameBoard({ user, profile, matchId, matchData }) {
   const [word, setWord] = useState('');
   const [letter, setLetter] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [timeLeft, setTimeLeft] = useState(99);
+  
   const [dictionary, setDictionary] = useState(new Set());
   const [dictLoading, setDictLoading] = useState(true);
   const dictionaryLoaded = useRef(false);
@@ -33,7 +36,9 @@ export default function GameBoard({ user, matchId, matchData }) {
   // the next real input (focus transitions input→input, keyboard never closes).
   const holdingRef = useRef(null);
 
-  const isP1 = user.uid === matchData.player1;
+  const [oppUsername, setOppUsername] = useState('Opp');
+
+  const isP1 = user.uid === matchData.player1Id;
   const myRole = isP1 ? matchData.player1Role : matchData.player2Role;
   const myLetter = isP1 ? matchData.player1Letter : matchData.player2Letter;
   const oppLetter = isP1 ? matchData.player2Letter : matchData.player1Letter;
@@ -45,11 +50,20 @@ export default function GameBoard({ user, matchId, matchData }) {
   const gameWinsTracked = matchData.player1GameWins !== undefined || matchData.player2GameWins !== undefined;
   const winTarget = matchData.winTarget || 5;
 
+  // Fetch opponent username
+  useEffect(() => {
+    const oppUid = isP1 ? matchData.player2Id : matchData.player1Id;
+    if (!oppUid) return;
+    getDoc(doc(firestore, 'users', oppUid)).then(snap => {
+      if (snap.exists()) setOppUsername(snap.data().username || 'Opp');
+    }).catch(() => {});
+  }, [matchData.player1Id, matchData.player2Id]);
+
   // Load Dictionary
   useEffect(() => {
     if (dictionaryLoaded.current) return;
     setDictLoading(true);
-    fetch('https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt')
+    fetch('https://raw.githubusercontent.com/dwyl/english-words/refs/heads/master/words_alpha.txt')
       .then(res => res.text())
       .then(text => {
         const words = text.split('\n').map(w => w.trim().toUpperCase());
@@ -63,36 +77,58 @@ export default function GameBoard({ user, matchId, matchData }) {
       });
   }, []);
 
-  // Reset local state on next round
   useEffect(() => {
-    if (matchData.state === 'PICKING_LETTERS' || matchData.state === 'SETUP_LENGTH') {
+    if (matchData.matchState === 'PICKING_LETTERS') {
       setWord('');
       setLetter('');
       setErrorMsg('');
     }
-  }, [matchData.state, matchData.currentRound]);
+  }, [matchData.matchState, matchData.currentRound]);
 
-  // Timer logic
   useEffect(() => {
-    if (matchData.state === 'GUESSING' && matchData.roundStartTime) {
+    if (matchData.matchState === 'GUESSING' && matchData.roundStartTime) {
       const interval = setInterval(() => {
         const elapsed = Math.floor((Date.now() - matchData.roundStartTime) / 1000);
         const remaining = Math.max(0, 99 - elapsed);
         setTimeLeft(remaining);
 
         if (remaining === 0 && isP1) {
-          // Trigger timeout handling (P1 handles logic to avoid double updates)
           handleTimeout();
         }
       }, 1000);
       return () => clearInterval(interval);
     }
-  }, [matchData.state, matchData.roundStartTime]);
+  }, [matchData.matchState, matchData.roundStartTime]);
+
+  // System Auto-Generation logic
+  useEffect(() => {
+    if (matchData.matchState === 'PICKING_LETTERS' && matchData.letterMode === 'system' && isP1) {
+      const generateSystemLetters = async () => {
+        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        const start = chars[Math.floor(Math.random() * chars.length)];
+        const end = chars[Math.floor(Math.random() * chars.length)];
+        
+        const matchRef = ref(db, `matches/${matchId}`);
+        await update(matchRef, {
+          matchState: 'GUESSING',
+          startLetter: start,
+          endLetter: end,
+          roundStartTime: Date.now(),
+          player1Letter: null,
+          player2Letter: null
+        });
+      };
+      
+      // Small delay for smooth transition feel
+      const timer = setTimeout(generateSystemLetters, 800);
+      return () => clearTimeout(timer);
+    }
+  }, [matchData.matchState, matchData.letterMode, isP1, matchId]);
 
   const handleTimeout = async () => {
     const matchRef = ref(db, `matches/${matchId}`);
     await update(matchRef, {
-      state: 'ENDED_ROUND',
+      matchState: 'ENDED_ROUND',
       lastRoundResult: { reason: 'timeout', winnerId: null }
     });
   };
@@ -114,7 +150,7 @@ export default function GameBoard({ user, matchId, matchData }) {
       const data = snapshot.val();
       if (data.player1Letter && data.player2Letter) {
         await update(matchRef, {
-          state: 'GUESSING',
+          matchState: 'GUESSING',
           startLetter: data.player1Role === 'START' ? data.player1Letter : data.player2Letter,
           endLetter: data.player1Role === 'END' ? data.player1Letter : data.player2Letter,
           roundStartTime: Date.now()
@@ -158,21 +194,51 @@ export default function GameBoard({ user, matchId, matchData }) {
       player2GameWins: (matchData.player2GameWins || 0) + (!isP1 ? 1 : 0),
     } : {};
 
-    await update(matchRef, {
-      ...newScores,
-      ...gameWinUpdates,
-      state: isGameOver ? 'GAME_OVER' : 'ENDED_ROUND',
-      winner: isGameOver ? user.uid : null,
-      lastRoundResult: {
+    // When a game ends, append an entry to game_history keyed by game number
+    const gameNumber = (matchData.player1GameWins || 0) + (matchData.player2GameWins || 0) + 1;
+    const historyEntry = isGameOver ? {
+      [`game_history/${gameNumber}`]: {
+        player1Score: newScores.player1Score,
+        player2Score: newScores.player2Score,
         winnerId: user.uid,
-        word: cleanWord,
-        translation: null,
-        reason: 'correct'
       }
-    });
+    } : {};
+
+    // Build Firestore pair stats update (must be awaited alongside Realtime DB
+    // so the data is committed before the user lands back in the room)
+    const pairStatsWrite = (isGameOver && matchData.player2Id) ? (() => {
+      const sortedUids = [matchData.player1Id, matchData.player2Id].sort();
+      const pairKey = sortedUids.join('_');
+      const p1IsFirst = sortedUids[0] === matchData.player1Id;
+      return setDoc(doc(firestore, 'player_pair_stats', pairKey), {
+        player1Id: sortedUids[0],
+        player2Id: sortedUids[1],
+        player1TotalScore: increment(p1IsFirst ? newScores.player1Score : newScores.player2Score),
+        player2TotalScore: increment(p1IsFirst ? newScores.player2Score : newScores.player1Score),
+        gamesPlayed: increment(1),
+      }, { merge: true }).catch(err => console.error('pairStats write failed:', err));
+    })() : Promise.resolve();
+
+    await Promise.all([
+      update(matchRef, {
+        ...newScores,
+        ...gameWinUpdates,
+        ...historyEntry,
+        matchState: isGameOver ? 'GAME_OVER' : 'ENDED_ROUND',
+        winnerId: isGameOver ? user.uid : null,
+        lastRoundResult: {
+          winnerId: user.uid,
+          word: cleanWord,
+          translation: null,
+          reason: 'correct'
+        }
+      }),
+      pairStatsWrite,
+    ]);
 
     // 2. FETCH TRANSLATION ASYNC
-    const translation = await getTranslation(cleanWord);
+    const targetLang = profile?.settings?.wordTranslationLang || 'zh-TW';
+    const translation = await getTranslation(cleanWord, targetLang);
 
     // 3. UPDATE DB WITH TRANSLATION (Popping in shortly after)
     await update(matchRef, {
@@ -193,7 +259,7 @@ export default function GameBoard({ user, matchId, matchData }) {
     const data = snapshot.val();
     if (data.player1Pass && data.player2Pass) {
       await update(matchRef, {
-        state: 'ENDED_ROUND',
+        matchState: 'ENDED_ROUND',
         lastRoundResult: { reason: 'pass', winnerId: null }
       });
     }
@@ -205,7 +271,7 @@ export default function GameBoard({ user, matchId, matchData }) {
     holdingRef.current?.focus();
     const matchRef = ref(db, `matches/${matchId}`);
     await update(matchRef, {
-      state: 'PICKING_LETTERS',
+      matchState: 'PICKING_LETTERS',
       player1Letter: null,
       player2Letter: null,
       player1Pass: null,
@@ -234,7 +300,7 @@ export default function GameBoard({ user, matchId, matchData }) {
     const p1HasRole = matchData.player1Role === role;
     const letterForRole = p1HasRole ? matchData.player1Letter : matchData.player2Letter;
 
-    if (matchData.state === 'GUESSING') {
+    if (matchData.matchState === 'GUESSING') {
       const revealed = isStart ? matchData.startLetter : matchData.endLetter;
       return {
         content: revealed,
@@ -258,6 +324,15 @@ export default function GameBoard({ user, matchId, matchData }) {
   const startBox = renderLetterBox('START');
   const endBox = renderLetterBox('END');
 
+  if (matchData.matchState === 'GAME_OVER') {
+    return (
+      <div className="game-board" style={{ justifyContent: 'center', alignItems: 'center' }}>
+        <h2 className="pulse">Game Over!</h2>
+        <p style={{ color: 'var(--text-muted)' }}>Calculating results...</p>
+      </div>
+    );
+  }
+
   return (
     <div>
       {/* Persistent off-screen input — always mounted so focus can be handed
@@ -267,11 +342,13 @@ export default function GameBoard({ user, matchId, matchData }) {
       <div className="game-board">
       <div className="scoreboard">
         <div className="score-item">
-          <span className="label">You</span>
+          <span className="label">{profile?.username || 'You'}</span>
+          <span className={`pass-badge${matchData.matchState === 'GUESSING' && (isP1 ? matchData.player1Pass : matchData.player2Pass) ? '' : ' pass-badge--hidden'}`}>PASSED</span>
           <span className="value">{myScore}</span>
         </div>
         <div className="score-item">
-          <span className="label">Opp</span>
+          <span className="label">{oppUsername}</span>
+          <span className={`pass-badge${matchData.matchState === 'GUESSING' && (!isP1 ? matchData.player1Pass : matchData.player2Pass) ? '' : ' pass-badge--hidden'}`}>PASSED</span>
           <span className="value">{oppScore}</span>
         </div>
       </div>
@@ -290,43 +367,54 @@ export default function GameBoard({ user, matchId, matchData }) {
       <div className="game-action-area">
         {dictLoading && <div className="dict-loading"><span className="spinner" /> Loading dictionary...</div>}
 
-        {matchData.state === 'PICKING_LETTERS' && (
+        {matchData.matchState === 'PICKING_LETTERS' && (
           <div className="pick-section">
-            <h2>
-              {!myLetter
-                ? `Pick the ${myRole === 'START' ? 'starting' : 'ending'} letter`
-                : 'Waiting for opponent...'}
-            </h2>
-            {myLetter && (
-              <div className="locked-confirmation">You locked: {myLetter}</div>
+            {matchData.letterMode === 'system' ? (
+               <div style={{ textAlign: 'center' }}>
+                 <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem' }}>
+                   <span className="spinner" style={{ width: '2rem', height: '2rem' }} />
+                 </div>
+                 <h2 className="pulse">System is choosing letters...</h2>
+               </div>
+            ) : (
+              <>
+                <h2>
+                  {!myLetter
+                    ? `Pick the ${myRole === 'START' ? 'starting' : 'ending'} letter`
+                    : 'Waiting for opponent...'}
+                </h2>
+                {myLetter && (
+                  <div className="locked-confirmation">You locked: {myLetter}</div>
+                )}
+                {/* Keep input mounted even while waiting so keyboard stays open.
+                    Hidden via opacity/height when locked; autoFocus opens keyboard. */}
+                <form
+                  className="pick-letter-form"
+                  onSubmit={e => { e.preventDefault(); submitPick(); }}
+                  style={{
+                    overflow: 'hidden',
+                    height: myLetter ? 0 : 'auto',
+                    opacity: myLetter ? 0 : 1,
+                    pointerEvents: myLetter ? 'none' : 'auto',
+                  }}
+                >
+                  <input
+                    className="pick-letter-input"
+                    type="text"
+                    maxLength="1"
+                    value={letter}
+                    onChange={e => setLetter(e.target.value.toUpperCase())}
+                    style={{ textTransform: 'uppercase' }}
+                    autoFocus
+                  />
+                  <button className="primary" type="submit">Lock</button>
+                </form>
+              </>
             )}
-            {/* Keep input mounted even while waiting so keyboard stays open.
-                Hidden via opacity/height when locked; autoFocus opens keyboard. */}
-            <form
-              onSubmit={e => { e.preventDefault(); submitPick(); }}
-              style={{
-                overflow: 'hidden',
-                height: myLetter ? 0 : 'auto',
-                opacity: myLetter ? 0 : 1,
-                pointerEvents: myLetter ? 'none' : 'auto',
-              }}
-            >
-              <input
-                type="text"
-                maxLength="1"
-                value={letter}
-                onChange={e => setLetter(e.target.value.toUpperCase())}
-                style={{ textTransform: 'uppercase' }}
-                autoFocus
-              />
-              <div className="controls">
-                <button className="primary" type="submit">Lock</button>
-              </div>
-            </form>
           </div>
         )}
 
-        {matchData.state === 'GUESSING' && (
+        {matchData.matchState === 'GUESSING' && (
           <>
             <div className={`timer ${getTimerClass(timeLeft)}`}>{timeLeft}</div>
 
@@ -340,7 +428,7 @@ export default function GameBoard({ user, matchId, matchData }) {
               />
               <div className="controls">
                 <button className="primary" type="submit">Submit</button>
-                <button type="button" onClick={handlePass}>Pass</button>
+                <button className={isP1 && matchData.player1Pass || !isP1 && matchData.player2Pass ? 'selected' : ''} type="button" onClick={handlePass}>Pass</button>
               </div>
             </form>
           </>
@@ -350,34 +438,26 @@ export default function GameBoard({ user, matchId, matchData }) {
       </div>
       </div>
 
-      {matchData.state === 'ENDED_ROUND' && matchData.lastRoundResult && createPortal(
-        <div className="popup-overlay">
-          <div className={`translation-popup ${matchData.lastRoundResult.winnerId === user.uid ? '' : (matchData.lastRoundResult.winnerId ? 'loss' : '')}`}>
-            <div className={`popup-title ${matchData.lastRoundResult.winnerId === user.uid ? 'win' : (matchData.lastRoundResult.winnerId ? 'loss' : '')}`}>
-              {matchData.lastRoundResult.reason === 'correct'
-                ? (matchData.lastRoundResult.winnerId === user.uid ? 'You Won!' : 'Opponent Won!')
-                : `Draw (${matchData.lastRoundResult.reason})`}
-            </div>
-
-            {matchData.lastRoundResult.word && (
-              <div className="word-block">
-                <div className="word">{matchData.lastRoundResult.word}</div>
-                <div className="chinese">
-                  {matchData.lastRoundResult.translation
-                    ? matchData.lastRoundResult.translation
-                    : <span className="translation-loading"><span className="spinner" /> Translating...</span>
-                  }
-                </div>
-              </div>
-            )}
-
-            <div className="popup-actions">
-              <button className="primary" onClick={nextRound}>Continue &rarr;</button>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
+      <ResultOverlay
+        isOpen={matchData.matchState === 'ENDED_ROUND' && !!matchData.lastRoundResult}
+        isWinner={matchData.lastRoundResult?.winnerId === user.uid}
+        isDraw={!matchData.lastRoundResult?.winnerId && matchData.lastRoundResult?.reason !== 'correct'}
+        reason={matchData.lastRoundResult?.reason}
+        word={matchData.lastRoundResult?.word}
+        translation={matchData.lastRoundResult?.translation}
+        title={
+          matchData.lastRoundResult?.reason === 'correct'
+            ? (matchData.lastRoundResult?.winnerId === user.uid ? 'You Won!' : 'Opponent Won!')
+            : matchData.lastRoundResult?.reason === 'pass' ? 'Draw (Passed)' : 'Draw (Timeout)'
+        }
+        actions={[
+          {
+            label: 'Continue \u2192',
+            isPrimary: true,
+            onClick: nextRound
+          }
+        ]}
+      />
     </div>
   );
 }

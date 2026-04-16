@@ -1,0 +1,56 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // User Profiles — keyed by uid
+    // Anyone can read (usernames shown in lobbies/game).
+    // Only the owning user can write their own doc.
+    match /users/{userId} {
+      allow read: if true;
+      allow create: if request.auth != null && request.auth.uid == userId;
+      allow update: if request.auth != null && request.auth.uid == userId;
+      // Owner can always delete their own doc.
+      // A different user can delete this doc only when all of these hold:
+      //   1. This doc has a username field (it's a real profile, not a stub)
+      //   2. claimed_usernames/{username} now points to the requester's uid
+      //      (meaning the username was migrated away from this old uid)
+      //   3. The requester's own profile has an email (fully linked account)
+      // This allows orphaned anonymous-uid docs to be cleaned up after a
+      // cross-device email-link migration, without a server.
+      allow delete: if request.auth != null && (
+        request.auth.uid == userId
+        || (
+          'username' in resource.data
+          && request.auth.uid != userId
+          && exists(/databases/$(database)/documents/claimed_usernames/$(resource.data.username))
+          && get(/databases/$(database)/documents/claimed_usernames/$(resource.data.username)).data.uid == request.auth.uid
+          && 'email' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data
+        )
+      );
+    }
+
+    // Name Registry — tracks claimed usernames
+    // Create/update by any auth user (claim on registration / uid migration).
+    // Delete never allowed from client.
+    match /claimed_usernames/{name} {
+      allow read: if true;
+      allow create: if request.auth != null;
+      allow update: if request.auth != null;
+      allow delete: if false;
+    }
+
+    // Player Pair Stats — cross-session accumulated points between two players.
+    // Key is {uid1}_{uid2} (sorted). Either player in the pair can read/write.
+    match /player_pair_stats/{pairId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && (
+        request.resource.data.player1Id == request.auth.uid ||
+        request.resource.data.player2Id == request.auth.uid
+      );
+      allow update: if request.auth != null && (
+        resource.data.player1Id == request.auth.uid ||
+        resource.data.player2Id == request.auth.uid
+      );
+    }
+  }
+}
