@@ -1,19 +1,16 @@
 # Changelog
 
 ## [0.1.2] - 2026-04-17
-### Added
-- Fluid Typography: Action buttons now use `self-adjusting` font sizes (via `clamp()`) to prevent text wrapping on small screens.
-- Standardized UI: Unified onboarding and lobby button classes for a more consistent cross-device experience.
-- Alphanumeric Validation: Strict regex filtering for usernames to ensure database compatibility.
-
-### Changed
-- Cost-Efficiency: Reverted word-bank storage to a single-document map structure, reducing Firestore read counts for small-to-medium profiles while maintaining scalability.
-- Improved UX: Renamed "Skip" to "Skip for Now" during account linking.
-- Optimized Stats: High-level statistics are now cached directly on the user profile for near-zero read costs.
+### Improved
+- **Word Bank Speed**: Optimised how your words are saved to ensure the game stays fast and stable, no matter how many thousands of words you find.
+- **Mobile Buttons**: Buttons now "self-adjust" their size to fit perfectly on any phone screen, preventing text from cutting off or wrapping.
+- **Better Onboarding**: Clarified the account setup process with smoother prompts and "Skip for Now" options.
+- **Stat Tracking**: Your personal records (Best Streak, Longest Word, etc.) now update instantly and accurately.
 
 ### Fixed
-- Firestore Permissions: Hardened security rules for `user_versus_matches` and `user_words` to eliminate authorization errors.
-- Mobile Layout: Resolved overflow and alignment issues with badges and buttons on iPhone SE/Mini viewports.
+- **Connection Issues**: Fixed rare errors that occurred at the end of matches.
+- **Mobile Layout**: Fixed alignment bugs for badges and scoreboard on small mobile devices.
+- **Name Security**: Added better filtering for usernames to keep the database tidy.
 
 ## [0.1.1] - 2026-04-16
 ### Added
