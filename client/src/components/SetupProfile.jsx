@@ -3,7 +3,7 @@ import { doc, runTransaction } from 'firebase/firestore';
 import { signInAnonymously, sendSignInLinkToEmail, setPersistence, browserLocalPersistence } from 'firebase/auth';
 import { auth, firestore } from '../firebase';
 
-const APP_VERSION = '0.1.2';
+const APP_VERSION = '0.1.3';
 
 
 // Atomically signs in and claims the username. Throws if the name is taken.
@@ -207,10 +207,10 @@ export default function SetupProfile({ onAuthComplete }) {
                 type="text"
                 className="glass-input"
                 value={name}
-                onChange={(e) => { 
-                  setError(null); 
+                onChange={(e) => {
+                  setError(null);
                   const val = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
-                  setName(val); 
+                  setName(val);
                 }}
                 placeholder=""
                 maxLength={12}
