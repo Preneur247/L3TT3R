@@ -25,6 +25,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New game modes and lobby configuration options for word length and win targets.
 - Enhanced UI consistency and glassmorphism styling across the app.
 
+## [0.1.2] - 2026-04-17
+### Added
+- Fluid Typography: Action buttons now use `self-adjusting` font sizes (via `clamp()`) to prevent text wrapping on small screens.
+- Standardized UI: Unified onboarding and lobby button classes for a more consistent cross-device experience.
+- Alphanumeric Validation: Strict regex filtering for usernames to ensure database compatibility.
+
+### Changed
+- Cost-Efficiency: Reverted word-bank storage to a single-document map structure, reducing Firestore read counts for small-to-medium profiles while maintaining scalability.
+- Improved UX: Renamed "Skip" to "Skip for Now" during account linking.
+- Optimized Stats: High-level statistics are now cached directly on the user profile for near-zero read costs.
+
+### Fixed
+- Firestore Permissions: Hardened security rules for `user_versus_matches` and `user_words` to eliminate authorization errors.
+- Mobile Layout: Resolved overflow and alignment issues with badges and buttons on iPhone SE/Mini viewports.
+
 ## [0.1.1] - 2026-04-16
 ### Added
 - Word Bank: Track and browse every unique word you have formed across all modes.

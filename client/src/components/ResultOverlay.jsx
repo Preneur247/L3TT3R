@@ -46,7 +46,18 @@ export default function ResultOverlay({
 
         {word && (
           <div className="word-block">
-            <div className="word">{word}</div>
+            <div 
+              className="word" 
+              style={{ 
+                fontSize: word.length > 15 ? '1.4rem' : word.length > 12 ? '1.8rem' : word.length > 9 ? '2.2rem' : '3rem',
+                transition: 'font-size 0.3s ease',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                wordBreak: 'normal'
+              }}
+            >
+              {word}
+            </div>
             <div className="chinese">
               {translation ? (
                 translation
@@ -65,11 +76,11 @@ export default function ResultOverlay({
           </div>
         )}
 
-        <div className={actions.length > 2 ? 'popup-actions-vertical' : 'popup-actions'}>
+        <div className={actions.length > 2 ? 'popup-actions-vertical' : 'modal-footer'}>
           {actions.map((action, idx) => (
             <button
               key={idx}
-              className={action.isPrimary ? 'primary' : ''}
+              className={`${action.isPrimary ? 'primary' : 'secondary'} btn-responsive`}
               onClick={action.onClick}
             >
               {action.label}

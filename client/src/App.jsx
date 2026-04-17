@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { auth, db, firestore } from './firebase';
 import { isSignInWithEmailLink, signInWithEmailLink, signOut } from 'firebase/auth';
-import { doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, getDocs, writeBatch, increment, onSnapshot } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, deleteDoc, increment, onSnapshot } from 'firebase/firestore';
 import { ref, onValue, update } from 'firebase/database';
 import Lobby from './components/Lobby';
 import GameBoard from './components/GameBoard';
@@ -18,7 +18,8 @@ function App() {
   const [returnRoomMatchId, setReturnRoomMatchId] = useState(null);
 
   const [profile, setProfile] = useState(null);
-  const statsRecordedRef = useRef(null);
+  const gamesPlayedRecordedRef = useRef(null);
+  const winsRecordedRef = useRef(null);
   const profileUnsubRef = useRef(null);
   // null = not started, 'onboarding' = show onboarding, 'ready' = authenticated
   const [authState, setAuthState] = useState('checking');
@@ -30,7 +31,9 @@ function App() {
     profileUnsubRef.current = onSnapshot(docRef, (docSnap) => {
       if (docSnap.exists()) {
         setProfile(docSnap.data());
-        setAuthState('ready');
+        // Only jump to 'ready' if we aren't in the middle of guest name setup.
+        // This prevents the "Link Account" screen from being cut off.
+        setAuthState(prev => prev === 'onboarding' ? 'onboarding' : 'ready');
       } else {
         // Email-linked user who has no profile yet — show guest name setup
         setUser(authUser);
@@ -127,38 +130,12 @@ function App() {
                 await setDoc(doc(firestore, 'claimed_usernames', cleanName), { 
                   uid: finalUser.uid
                 }, { merge: true });
-                if (originalUid !== finalUser.uid) {
-                  // Migrate player_pair_stats from originalUid to finalUser.uid
-                  const q1 = query(collection(firestore, 'player_pair_stats'), where('player1Id', '==', originalUid));
-                  const q2 = query(collection(firestore, 'player_pair_stats'), where('player2Id', '==', originalUid));
-                  const [s1, s2] = await Promise.all([getDocs(q1), getDocs(q2)]);
-                  const statsDocs = [...s1.docs, ...s2.docs];
-                  
-                  if (statsDocs.length > 0) {
-                    const batch = writeBatch(firestore);
-                    for (const sDoc of statsDocs) {
-                      const data = sDoc.data();
-                      const otherUid = data.player1Id === originalUid ? data.player2Id : data.player1Id;
-                      const sortedUids = [finalUser.uid, otherUid].sort();
-                      const newPairKey = sortedUids.join('_');
-                      
-                      const oldUserScore = data.player1Id === originalUid ? data.player1TotalScore : data.player2TotalScore;
-                      const otherUserScore = data.player1Id === originalUid ? data.player2TotalScore : data.player1TotalScore;
-                      
-                      batch.set(doc(firestore, 'player_pair_stats', newPairKey), {
-                        player1Id: sortedUids[0],
-                        player2Id: sortedUids[1],
-                        player1TotalScore: increment(sortedUids[0] === finalUser.uid ? oldUserScore : otherUserScore),
-                        player2TotalScore: increment(sortedUids[1] === finalUser.uid ? oldUserScore : otherUserScore),
-                        gamesPlayed: increment(data.gamesPlayed)
-                      }, { merge: true });
-                      batch.delete(sDoc.ref);
-                    }
-                    await batch.commit().catch(err => console.error('Stats migration failed:', err));
-                  }
 
+                if (originalUid !== finalUser.uid) {
+                  // Clean up old profile stub
                   await deleteDoc(doc(firestore, 'users', originalUid));
                 }
+                
                 setProfile(profileData);
                 setAuthState('ready');
                 return;
@@ -224,70 +201,66 @@ function App() {
     return () => unsubscribe();
   }, [currentMatchId]);
 
-  // Record game-over stats once per match
+  // Note: gamesPlayed recording moved to GAME_OVER effect
+
+  // Record game-over stats once per game
   useEffect(() => {
-    if (gameState === 'GAME_OVER' && matchData?.winnerId && user?.uid && currentMatchId !== statsRecordedRef.current) {
-      statsRecordedRef.current = currentMatchId;
+    const gameCount = (matchData?.player1GamesWon || 0) + (matchData?.player2GamesWon || 0);
+    const recordKey = `${currentMatchId}_${gameCount}`;
+
+    if (gameState === 'GAME_OVER' && matchData?.winnerId && user?.uid && recordKey !== winsRecordedRef.current) {
+      winsRecordedRef.current = recordKey;
       
       const isWinner = matchData.winnerId === user.uid;
       const mode = matchData.mode || 'versus';
       const statsRef = doc(firestore, 'users', user.uid);
       
       const updates = {
-        'stats.overall.gamesPlayed': increment(1),
-        [`stats.${mode}.gamesPlayed`]: increment(1),
-        'stats.overall.gamesWon': increment(isWinner ? 1 : 0),
+        'stats.total.gamesWon': increment(isWinner ? 1 : 0),
         [`stats.${mode}.gamesWon`]: increment(isWinner ? 1 : 0),
+        'stats.total.gamesPlayed': increment(1),
+        [`stats.${mode}.gamesPlayed`]: increment(1)
       };
 
       if (isWinner) {
-        const modeStats = profile?.stats?.[mode] || { currentStreak: 0, bestStreak: 0 };
-        const newStreak = (modeStats.currentStreak || 0) + 1;
-        updates[`stats.${mode}.currentStreak`] = newStreak;
-        if (newStreak > (modeStats.bestStreak || 0)) {
-          updates[`stats.${mode}.bestStreak`] = newStreak;
+        // Mode-specific streak
+        const modeStats = profile?.stats?.[mode] || {};
+        const currentStreakValue = (modeStats.currentStreak || modeStats.streak || 0);
+        const modeStreak = currentStreakValue + 1;
+        
+        updates[`stats.${mode}.currentStreak`] = modeStreak;
+        if (modeStreak > (modeStats.bestStreak || 0)) {
+          updates[`stats.${mode}.bestStreak`] = modeStreak;
         }
       } else {
         updates[`stats.${mode}.currentStreak`] = 0;
       }
 
-      updateDoc(statsRef, updates).catch(err => console.error('App.jsx stats update failed:', err));
-    }
-  }, [gameState, matchData, currentMatchId, user?.uid, profile]);
+      updateDoc(statsRef, updates).catch(err => console.error('App.jsx wins/streak update failed:', err));
 
-  // Migrate legacy flat stats to new nested structure
-  useEffect(() => {
-    if (authState === 'ready' && profile && user?.uid && profile.stats) {
-      const stats = profile.stats;
-      const needsMigration = !stats.overall || stats.overall.wins !== undefined;
-
-      if (needsMigration) {
-        const migrate = async () => {
-          const gamesPlayed = stats.gamesPlayed || stats.overall?.gamesPlayed || 0;
-          const gamesWon = stats.wins || stats.overall?.wins || stats.overall?.gamesWon || 0;
-          const wordsFormed = stats.wordsFormed || stats.overall?.wordsFormed || 0;
-          const streak = stats.streak || stats.versus?.currentStreak || 0;
-          const bestStreak = stats.versus?.bestStreak || streak;
-
-          const newStats = {
-            overall: { gamesPlayed, gamesWon, wordsFormed },
-            versus: { gamesPlayed, gamesWon, wordsFormed, currentStreak: streak, bestStreak: bestStreak },
-            solo: { gamesPlayed: 0, gamesWon: 0, wordsFormed: 0, currentStreak: 0, bestStreak: 0 },
-            party: { gamesPlayed: 0, gamesWon: 0, wordsFormed: 0, currentStreak: 0, bestStreak: 0 }
-          };
-
-          try {
-            const userRef = doc(firestore, 'users', user.uid);
-            await setDoc(userRef, { stats: newStats }, { merge: true });
-            setProfile(prev => ({ ...prev, stats: newStats }));
-          } catch (err) {
-            console.error('Migration failed:', err);
-          }
-        };
-        migrate();
+      // Record head-to-head stats (Shared record, only winner updates to avoid double-counting gamesPlayed)
+      if (isWinner) {
+        const p1 = matchData.player1Id;
+        const p2 = matchData.player2Id;
+        if (p1 && p2) {
+          const sortedUids = [p1, p2].sort();
+          const pairKey = sortedUids.join('_');
+          const pairRef = doc(firestore, 'user_versus_matches', pairKey);
+          
+          const isSortedP1 = user.uid === sortedUids[0];
+          setDoc(pairRef, {
+            player1Id: sortedUids[0],
+            player2Id: sortedUids[1],
+            gamesPlayed: increment(1),
+            [isSortedP1 ? 'player1GamesWon' : 'player2GamesWon']: increment(1)
+          }, { merge: true }).catch(err => console.error('user_versus_matches update failed:', err));
+        }
       }
     }
-  }, [authState, profile, user?.uid]);
+  }, [gameState, matchData?.winnerId, currentMatchId, user?.uid, profile?.stats, matchData?.player1GamesWon, matchData?.player2GamesWon, matchData?.mode, matchData?.player1Id, matchData?.player2Id]);
+
+  // Match logic (no longer contains migration triggers)
+
 
   if (authState === 'checking') {
     return <div className="glass-card"><h1>L3TT3R</h1><div className="subtitle">Connecting...</div></div>;
@@ -344,10 +317,9 @@ function App() {
               label: 'Play Again',
               isPrimary: true,
               onClick: async () => {
-                setReturnRoomMatchId(currentMatchId);
                 const matchRef = ref(db, `matches/${currentMatchId}`);
                 await update(matchRef, {
-                  matchState: 'ROOM_SETUP',
+                  matchState: 'PICKING_LETTERS',
                   winnerId: null,
                   gameOverReason: null,
                   player1Score: 0,
@@ -356,15 +328,14 @@ function App() {
                   player2Letter: null,
                   player1Pass: null,
                   player2Pass: null,
-                  player1Role: null,
-                  player2Role: null,
+                  player1Role: 'START',
+                  player2Role: 'END',
                   startLetter: null,
                   endLetter: null,
                   roundStartTime: null,
-                  currentRound: null,
+                  currentRound: 1,
                   lastRoundResult: null,
-                  minWordLength: null,
-                  winTarget: null,
+                  // Rules (minWordLength, winTarget, letterMode) are preserved
                 });
               }
             },
@@ -390,8 +361,6 @@ function App() {
                   roundStartTime: null,
                   currentRound: null,
                   lastRoundResult: null,
-                  minWordLength: null,
-                  winTarget: null,
                 });
               }
             }

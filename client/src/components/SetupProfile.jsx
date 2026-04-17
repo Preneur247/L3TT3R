@@ -3,7 +3,7 @@ import { doc, runTransaction } from 'firebase/firestore';
 import { signInAnonymously, sendSignInLinkToEmail, setPersistence, browserLocalPersistence } from 'firebase/auth';
 import { auth, firestore } from '../firebase';
 
-const APP_VERSION = '0.1.1';
+const APP_VERSION = '0.1.2';
 
 
 // Atomically signs in and claims the username. Throws if the name is taken.
@@ -22,12 +22,11 @@ async function claimAndRegister(cleanName) {
     tx.set(doc(firestore, 'users', user.uid), {
       username,
       stats: {
-        overall: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0 },
-        versus: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0, currentStreak: 0, bestStreak: 0 },
-        solo: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0, currentStreak: 0, bestStreak: 0 },
-        party: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0, currentStreak: 0, bestStreak: 0 }
+        total: { gamesPlayed: 0, gamesWon: 0, wordsFormed: 0 },
+        party: { bestStreak: 0, currentStreak: 0, gamesPlayed: 0, gamesWon: 0, wordsFormed: 0 },
+        solo: { bestStreak: 0, currentStreak: 0, gamesPlayed: 0, gamesWon: 0, wordsFormed: 0 },
+        versus: { bestStreak: 0, currentStreak: 0, gamesPlayed: 0, gamesWon: 0, wordsFormed: 0 }
       },
-      words: {},
       settings: { appInterfaceLang: 'en', wordTranslationLang: 'zh-TW' },
       createdAt: Date.now(),
     });
@@ -62,10 +61,11 @@ export default function SetupProfile({ onAuthComplete }) {
   const defaultProfile = (username) => ({
     username,
     stats: {
-      overall: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0 },
-      versus: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0, currentStreak: 0, bestStreak: 0 },
-      solo: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0, currentStreak: 0, bestStreak: 0 },
-      party: { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0, currentStreak: 0, bestStreak: 0 }
+      gamesWon: 0,
+      gamesPlayed: 0,
+      wordsFormed: 0,
+      currentStreak: 0,
+      bestStreak: 0
     },
     words: {},
     settings: { appInterfaceLang: 'en', wordTranslationLang: 'zh-TW' },
@@ -207,7 +207,11 @@ export default function SetupProfile({ onAuthComplete }) {
                 type="text"
                 className="glass-input"
                 value={name}
-                onChange={(e) => { setError(null); setName(e.target.value.toUpperCase()); }}
+                onChange={(e) => { 
+                  setError(null); 
+                  const val = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+                  setName(val); 
+                }}
                 placeholder=""
                 maxLength={12}
                 autoFocus
@@ -238,11 +242,11 @@ export default function SetupProfile({ onAuthComplete }) {
                 </div>
               </div>
               {error && <div className="error-message">{error}</div>}
-              <div style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
-                <button style={{ flex: 1 }} onClick={handleSkip} disabled={loading}>
-                  Skip
+              <div className="modal-footer" style={{ border: 'none', padding: 0 }}>
+                <button type="button" className="btn-responsive" onClick={handleSkip} disabled={loading}>
+                  Skip for Now
                 </button>
-                <button className="primary" style={{ flex: 1 }} onClick={() => go('link')} disabled={loading}>
+                <button type="button" className="primary btn-responsive" onClick={() => go('link')} disabled={loading}>
                   Link Account
                 </button>
               </div>
@@ -270,9 +274,9 @@ export default function SetupProfile({ onAuthComplete }) {
                 We'll email you a one-tap link.
               </div>
               {error && <div className="error-message">{error}</div>}
-              <div style={{ display: 'flex', gap: '0.75rem' }}>
-                <button type="button" style={{ flex: 1 }} onClick={() => go('prompt')} disabled={loading}>Back</button>
-                <button type="submit" className="primary" style={{ flex: 2 }} disabled={loading || !email}>
+              <div className="modal-footer" style={{ border: 'none', padding: 0 }}>
+                <button type="button" className="btn-responsive" onClick={() => go('prompt')} disabled={loading}>Back</button>
+                <button type="submit" className="primary btn-responsive" style={{ flex: 1.5 }} disabled={loading || !email}>
                   {loading ? <span className="spinner" /> : 'Send Link'}
                 </button>
               </div>
@@ -300,11 +304,12 @@ export default function SetupProfile({ onAuthComplete }) {
               {/* Only the Play Link flow has an escape hatch */}
               {sentMode === 'link' && pendingAuth && (
                 <button
+                  type="button"
                   onClick={() => {
                     window.localStorage.removeItem('pendingLinkUid');
                     onAuthComplete(pendingAuth.user, pendingAuth.profileData);
                   }}
-                  className="full-width"
+                  className="btn-responsive full-width"
                 >
                   Enter without linking
                 </button>
@@ -339,19 +344,21 @@ export default function SetupProfile({ onAuthComplete }) {
               <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
               Settings
             </h2>
-            <div className="settings-group">
-              <label className="settings-label">App Interface</label>
-              <select className="glass-select" value="en" disabled>
-                <option value="en">English</option>
-              </select>
+            <div className="modal-body">
+              <div className="settings-group">
+                <label className="settings-label">App Interface</label>
+                <select className="glass-select" value="en" disabled>
+                  <option value="en">English</option>
+                </select>
+              </div>
+              <div className="settings-group">
+                <label className="settings-label">Word Translation</label>
+                <select className="glass-select" value="zh-TW" disabled>
+                  <option value="zh-TW">繁體中文</option>
+                </select>
+              </div>
             </div>
-            <div className="settings-group">
-              <label className="settings-label">Word Translation</label>
-              <select className="glass-select" value="zh-TW" disabled>
-                <option value="zh-TW">繁體中文</option>
-              </select>
-            </div>
-            <div style={{ textAlign: 'center', marginTop: '2.5rem' }}>
+            <div style={{ textAlign: 'center', marginTop: '1.5rem', flexShrink: 0 }}>
               <button className="primary" onClick={() => setShowSettings(false)}>Close</button>
             </div>
           </div>

@@ -7,8 +7,13 @@ service cloud.firestore {
     // Only the owning user can write their own doc.
     match /users/{userId} {
       allow read: if true;
-      allow create: if request.auth != null && request.auth.uid == userId;
-      allow update: if request.auth != null && request.auth.uid == userId;
+      allow create, update: if request.auth != null && request.auth.uid == userId;
+
+      // Recursive rule for sub-collections (word_bank, etc.)
+      match /{allPaths=**} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
       // Owner can always delete their own doc.
       // A different user can delete this doc only when all of these hold:
       //   1. This doc has a username field (it's a real profile, not a stub)
@@ -39,17 +44,18 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Player Pair Stats — cross-session accumulated points between two players.
-    // Key is {uid1}_{uid2} (sorted). Either player in the pair can read/write.
-    match /player_pair_stats/{pairId} {
+    // User Word Bank
+    match /user_words/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // User Versus Matches (Shared stats key: {uid1}_{uid2})
+    match /user_versus_matches/{pairId} {
       allow read: if request.auth != null;
-      allow create: if request.auth != null && (
-        request.resource.data.player1Id == request.auth.uid ||
-        request.resource.data.player2Id == request.auth.uid
-      );
-      allow update: if request.auth != null && (
-        resource.data.player1Id == request.auth.uid ||
-        resource.data.player2Id == request.auth.uid
+      allow create, update: if request.auth != null && (
+        request.auth.uid == request.resource.data.player1Id || 
+        request.auth.uid == request.resource.data.player2Id ||
+        (resource != null && (request.auth.uid == resource.data.player1Id || request.auth.uid == resource.data.player2Id))
       );
     }
   }

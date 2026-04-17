@@ -45,9 +45,9 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
 
   const myScore = isP1 ? matchData.player1Score : matchData.player2Score;
   const oppScore = isP1 ? matchData.player2Score : matchData.player1Score;
-  const myGameWins = isP1 ? (matchData.player1GameWins || 0) : (matchData.player2GameWins || 0);
-  const oppGameWins = isP1 ? (matchData.player2GameWins || 0) : (matchData.player1GameWins || 0);
-  const gameWinsTracked = matchData.player1GameWins !== undefined || matchData.player2GameWins !== undefined;
+  const myGamesWon = isP1 ? (matchData.player1GamesWon || 0) : (matchData.player2GamesWon || 0);
+  const oppGamesWon = isP1 ? (matchData.player2GamesWon || 0) : (matchData.player1GamesWon || 0);
+  const gamesWonTracked = matchData.player1GamesWon !== undefined || matchData.player2GamesWon !== undefined;
   const winTarget = matchData.winTarget || 5;
 
   // Fetch opponent username
@@ -189,13 +189,13 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
       : { player1Score: (matchData.player1Score || 0), player2Score: (matchData.player2Score || 0) + 1 };
 
     const isGameOver = (newScores.player1Score >= winTarget || newScores.player2Score >= winTarget);
-    const gameWinUpdates = isGameOver ? {
-      player1GameWins: (matchData.player1GameWins || 0) + (isP1 ? 1 : 0),
-      player2GameWins: (matchData.player2GameWins || 0) + (!isP1 ? 1 : 0),
+    const gameWonUpdates = isGameOver ? {
+      player1GamesWon: (matchData.player1GamesWon || 0) + (isP1 ? 1 : 0),
+      player2GamesWon: (matchData.player2GamesWon || 0) + (!isP1 ? 1 : 0),
     } : {};
 
     // When a game ends, append an entry to game_history keyed by game number
-    const gameNumber = (matchData.player1GameWins || 0) + (matchData.player2GameWins || 0) + 1;
+    const gameNumber = (matchData.player1GamesWon || 0) + (matchData.player2GamesWon || 0) + 1;
     const historyEntry = isGameOver ? {
       [`game_history/${gameNumber}`]: {
         player1Score: newScores.player1Score,
@@ -205,22 +205,54 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
     } : {};
 
     // Build player stats update for current user
-    const playerStatsWrite = (() => {
-      const mode = matchData.mode || 'versus';
-      const statsRef = doc(firestore, 'users', user.uid);
-      const updates = {
-        'stats.overall.wordsFormed': increment(1),
-        [`stats.${mode}.wordsFormed`]: increment(1),
-        [`words.${cleanWord.toUpperCase()}`]: increment(1)
-      };
-      return updateDoc(statsRef, updates).catch(err => console.error('playerStatsWrite failed:', err));
+    const playerStatsWrite = (async () => {
+      try {
+        const statsRef = doc(firestore, 'users', user.uid);
+        const wordsDocRef = doc(firestore, 'user_words', user.uid);
+        const mode = matchData.mode || 'versus';
+        const safeWord = cleanWord.toUpperCase().replace(/\./g, '_');
+
+        // 1. Parallel write to update counts
+        await Promise.all([
+          updateDoc(statsRef, {
+            'stats.total.wordsFormed': increment(1),
+            [`stats.${mode}.wordsFormed`]: increment(1)
+          }),
+          setDoc(wordsDocRef, {
+            words: {
+              [safeWord]: increment(1)
+            }
+          }, { merge: true })
+        ]);
+
+        // 2. Fetch the updated bank to sync record holders in the profile
+        const wordsSnap = await getDoc(wordsDocRef);
+        if (wordsSnap.exists()) {
+          const words = wordsSnap.data().words || {};
+          const wordEntries = Object.entries(words);
+          if (wordEntries.length > 0) {
+            const mostUsed = wordEntries.reduce((a, b) => b[1] > a[1] ? b : a);
+            const longest = wordEntries.reduce((a, b) => b[0].length > a[0].length ? b : a);
+            
+            await updateDoc(statsRef, {
+              'stats.total.mostUsedWord': mostUsed[0],
+              'stats.total.mostUsedWordCount': mostUsed[1],
+              'stats.total.longestWord': longest[0],
+              'stats.total.longestWordLen': longest[0].length,
+              'stats.total.uniqueWords': wordEntries.length
+            });
+          }
+        }
+      } catch (err) {
+        console.error('playerStatsWrite failed:', err);
+      }
     })();
 
 
     await Promise.all([
       update(matchRef, {
         ...newScores,
-        ...gameWinUpdates,
+        ...gameWonUpdates,
         ...historyEntry,
         matchState: isGameOver ? 'GAME_OVER' : 'ENDED_ROUND',
         winnerId: isGameOver ? user.uid : null,
@@ -231,7 +263,6 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
           reason: 'correct'
         }
       }),
-      pairStatsWrite,
       playerStatsWrite,
     ]);
 
@@ -339,14 +370,28 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
       <input ref={holdingRef} type="text" style={holdingStyle} readOnly tabIndex={-1} />
 
       <div className="game-board">
-      <div className="scoreboard">
-        <div className="score-item">
-          <span className="label">{profile?.username || 'You'}</span>
+      <div className="scoreboard" style={{ gap: '0.5rem' }}>
+        <div className="score-item" style={{ flex: 1, minWidth: 0 }}>
+          <span className="label" style={{ 
+            overflow: 'hidden', 
+            textOverflow: 'ellipsis', 
+            whiteSpace: 'nowrap',
+            display: 'block'
+          }}>
+            {profile?.username || 'You'}
+          </span>
           <span className={`pass-badge${matchData.matchState === 'GUESSING' && (isP1 ? matchData.player1Pass : matchData.player2Pass) ? '' : ' pass-badge--hidden'}`}>PASSED</span>
           <span className="value">{myScore}</span>
         </div>
-        <div className="score-item">
-          <span className="label">{oppUsername}</span>
+        <div className="score-item" style={{ flex: 1, minWidth: 0 }}>
+          <span className="label" style={{ 
+            overflow: 'hidden', 
+            textOverflow: 'ellipsis', 
+            whiteSpace: 'nowrap',
+            display: 'block'
+          }}>
+            {oppUsername}
+          </span>
           <span className={`pass-badge${matchData.matchState === 'GUESSING' && (!isP1 ? matchData.player1Pass : matchData.player2Pass) ? '' : ' pass-badge--hidden'}`}>PASSED</span>
           <span className="value">{oppScore}</span>
         </div>
@@ -355,7 +400,6 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
       <div className="game-info-bar">
         <span className="info-chip">{'\u2605'} {winTarget}</span>
         <span className="info-chip">{'\u2265'} {matchData.minWordLength || 3}</span>
-        {gameWinsTracked && <span className="info-chip">{myGameWins} : {oppGameWins}</span>}
       </div>
 
       <div className="letters-display">
@@ -406,7 +450,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
                     style={{ textTransform: 'uppercase' }}
                     autoFocus
                   />
-                  <button className="primary" type="submit">Lock</button>
+                  <button className="primary btn-responsive" type="submit" style={{ flex: '0 0 auto', width: 'auto', padding: '0.75rem 1.5rem' }}>Lock</button>
                 </form>
               </>
             )}
@@ -425,10 +469,10 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
                 placeholder="Type your word..."
                 autoFocus
               />
-              <div className="controls">
-                <button className="primary" type="submit">Submit</button>
-                <button className={isP1 && matchData.player1Pass || !isP1 && matchData.player2Pass ? 'selected' : ''} type="button" onClick={handlePass}>Pass</button>
-              </div>
+               <div className="controls modal-footer" style={{ marginTop: '1.5rem', borderTop: 'none', padding: 0 }}>
+                  <button className="primary btn-responsive" type="submit">Submit</button>
+                  <button className={`btn-responsive ${isP1 && matchData.player1Pass || !isP1 && matchData.player2Pass ? 'selected' : 'secondary'}`} type="button" onClick={handlePass}>Pass</button>
+                </div>
             </form>
           </>
         )}
