@@ -5,7 +5,7 @@ import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
 import { db, firestore } from '../firebase';
 import LinkAccount from './LinkAccount';
 
-const APP_VERSION = '0.1.1';
+const APP_VERSION = '0.1.3';
 
 function generateRoomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
