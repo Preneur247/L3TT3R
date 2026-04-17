@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.1.3] - 2026-04-17
+### Fixed
+- **Stability update**: Fixed statistics word bank count and most used/longest word calculations. Fixed button placement in game end screen.
+
 ## [0.1.2] - 2026-04-17
 ### Improved
 - **Word Bank Speed**: Optimised how your words are saved to ensure the game stays fast and stable, no matter how many thousands of words you find.

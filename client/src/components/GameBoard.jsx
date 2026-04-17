@@ -210,31 +210,36 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
         const statsRef = doc(firestore, 'users', user.uid);
         const wordsDocRef = doc(firestore, 'user_words', user.uid);
         const mode = matchData.mode || 'versus';
-        const safeWord = cleanWord.toUpperCase().replace(/\./g, '_');
+        const safeWord = cleanWord.toUpperCase();
 
-        // 1. Parallel write to update counts
-        await Promise.all([
-          updateDoc(statsRef, {
-            'stats.total.wordsFormed': increment(1),
-            [`stats.${mode}.wordsFormed`]: increment(1)
-          }),
-          setDoc(wordsDocRef, {
-            words: {
-              [safeWord]: increment(1)
-            }
-          }, { merge: true })
-        ]);
+        // 1. Update the word bank (word counts)
+        // We use setDoc with merge:true to ensure the 'words' map is updated/created correctly
+        await setDoc(wordsDocRef, {
+          words: {
+            [safeWord]: increment(1)
+          }
+        }, { merge: true });
 
-        // 2. Fetch the updated bank to sync record holders in the profile
+        // 2. Fetch the updated bank to sync records in the profile
         const wordsSnap = await getDoc(wordsDocRef);
         if (wordsSnap.exists()) {
           const words = wordsSnap.data().words || {};
           const wordEntries = Object.entries(words);
+          
           if (wordEntries.length > 0) {
-            const mostUsed = wordEntries.reduce((a, b) => b[1] > a[1] ? b : a);
+            const mostUsed = wordEntries.reduce((a, b) => {
+              // Handle potential FieldValue objects if they haven't been resolved (rare)
+              const aCount = typeof a[1] === 'number' ? a[1] : 0;
+              const bCount = typeof b[1] === 'number' ? b[1] : 0;
+              return bCount > aCount ? b : a;
+            });
+
             const longest = wordEntries.reduce((a, b) => b[0].length > a[0].length ? b : a);
             
+            // 3. Batch all stats updates into one write
             await updateDoc(statsRef, {
+              'stats.total.wordsFormed': increment(1),
+              [`stats.${mode}.wordsFormed`]: increment(1),
               'stats.total.mostUsedWord': mostUsed[0],
               'stats.total.mostUsedWordCount': mostUsed[1],
               'stats.total.longestWord': longest[0],
