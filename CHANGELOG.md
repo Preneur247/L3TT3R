@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4] - 2026-04-18
+### Added
+- **Unified Versioning**: Centralised all version tracking into a single file for better reliability.
+- **Mobile Icon Fixes**: Added high-resolution icon support and fixed display bugs on iOS and Android devices.
+- **PWA Support**: Added a web manifest so the game feels more like a native app when saved to your home screen.
+- **Easy Deploy**: Added a new "one-click" command to build and push updates to the web instantly.
+
 ## [0.1.3] - 2026-04-17
 ### Fixed
 - **Stability update**: Fixed statistics word bank count and most used/longest word calculations. Fixed button placement in game end screen.
