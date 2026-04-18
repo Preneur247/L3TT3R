@@ -3,7 +3,7 @@ import { doc, runTransaction } from 'firebase/firestore';
 import { signInAnonymously, sendSignInLinkToEmail, setPersistence, browserLocalPersistence } from 'firebase/auth';
 import { auth, firestore } from '../firebase';
 
-const APP_VERSION = '0.1.3';
+// Using global __APP_VERSION__ from vite.config.js
 
 
 // Atomically signs in and claims the username. Throws if the name is taken.
@@ -328,7 +328,7 @@ export default function SetupProfile({ onAuthComplete }) {
             </div>
             <div style={{ textAlign: 'center', marginTop: '0.75rem' }}>
               <span className="version-text" style={{ position: 'static', opacity: 0.3, fontSize: '0.75rem' }}>
-                v{APP_VERSION}
+                v{__APP_VERSION__}
               </span>
             </div>
           </div>
