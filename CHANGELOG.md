@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.5] - 2026-04-18
+- **App Icon Reliability**: Finalised a stable app icon setup that works across all mobile devices, including Safari on iPhone.
+- **PWA Enhancements**: Improved the web manifest for better home screen installation.
+- **Improved Versioning**: Updated internal tools to follow strict semantic versioning (Major.Minor.Patch).
+
 ## [0.1.4] - 2026-04-18
 ### Added
 - **Unified Versioning**: Centralised all version tracking into a single file for better reliability.
