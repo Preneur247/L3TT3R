@@ -3,14 +3,10 @@
   "name": "L3TT3R: Word Race",
   "icons": [
     {
-      "src": "favicon.png",
+      "src": "pwa-favicon.png",
       "sizes": "512x512",
-      "type": "image/png"
-    },
-    {
-      "src": "favicon.png",
-      "sizes": "192x192",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any"
     }
   ],
   "start_url": ".",
