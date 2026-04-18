@@ -5,7 +5,7 @@ import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
 import { db, firestore } from '../firebase';
 import LinkAccount from './LinkAccount';
 
-const APP_VERSION = '0.1.3';
+// Using global __APP_VERSION__ from vite.config.js
 
 function generateRoomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -1424,7 +1424,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       {/* Version — sits below the card, outside lobby-container */}
       <div style={{ textAlign: 'center', marginTop: '0.75rem' }}>
         <span className="version-text" style={{ position: 'static', opacity: 0.3, fontSize: '0.75rem' }}>
-          v{APP_VERSION}
+          v{__APP_VERSION__}
         </span>
       </div>
     </>
