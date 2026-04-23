@@ -17,7 +17,7 @@
     "matches": {
       "$matchId": {
         ".read": "auth != null",
-        ".write": "auth != null && (!data.exists() || data.child('player1Id').val() === auth.uid || data.child('player2Id').val() === auth.uid || newData.child('player2Id').val() === auth.uid)"
+        ".write": "auth != null && (!data.exists() || data.child('player1Id').val() === auth.uid || data.child('player2Id').val() === auth.uid || (data.child('matchState').val() === 'WAITING' && !data.child('player2Id').exists() && newData.child('player2Id').val() === auth.uid))"
       }
     }
   }

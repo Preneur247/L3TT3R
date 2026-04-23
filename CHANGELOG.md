@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.6] - 2026-04-23
+- **Smoother Gameplay**: Fixed several bugs that caused the screen to flash or menus to freeze when entering and leaving rooms quickly.
+- **Connection Handling**: The game now gracefully returns you to the main lobby if your opponent loses their internet connection during a match.
+- **Timer Fix**: Fixed a visual bug where the game timer would briefly show the leftover time from the previous round before resetting.
+
 ## [0.1.5] - 2026-04-18
 - **App Icon Reliability**: Finalised a stable app icon setup that works across all mobile devices, including Safari on iPhone.
 - **PWA Enhancements**: Improved the web manifest for better home screen installation.

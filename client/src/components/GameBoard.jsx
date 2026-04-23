@@ -1,9 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
-import { createPortal } from 'react-dom';
-import { ref, update, onValue, get } from 'firebase/database';
+import { ref, runTransaction } from 'firebase/database';
 import { doc, getDoc, setDoc, updateDoc, increment } from 'firebase/firestore';
 import { db, firestore } from '../firebase';
-import SetupProfile from './SetupProfile';
 import ResultOverlay from './ResultOverlay';
 
 function getTimerClass(seconds) {
@@ -37,6 +35,8 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
   const holdingRef = useRef(null);
 
   const [oppUsername, setOppUsername] = useState('Opp');
+
+  const submittingRef = useRef(false);
 
   const isP1 = user.uid === matchData.player1Id;
   const myRole = isP1 ? matchData.player1Role : matchData.player2Role;
@@ -82,17 +82,30 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
       setWord('');
       setLetter('');
       setErrorMsg('');
+      setTimeLeft(99);
     }
   }, [matchData.matchState, matchData.currentRound]);
 
   useEffect(() => {
     if (matchData.matchState === 'GUESSING' && matchData.roundStartTime) {
-      const interval = setInterval(() => {
+      const calcRemaining = () => {
         const elapsed = Math.floor((Date.now() - matchData.roundStartTime) / 1000);
-        const remaining = Math.max(0, 99 - elapsed);
+        return Math.max(0, 99 - elapsed);
+      };
+      
+      // Set immediately to prevent 1-second delay flash
+      setTimeLeft(calcRemaining());
+
+      let timeoutTriggered = false;
+      const interval = setInterval(() => {
+        const remaining = calcRemaining();
         setTimeLeft(remaining);
 
-        if (remaining === 0 && isP1) {
+        // Both players watch the clock — transaction in handleTimeout ensures only one wins.
+        // This also covers P1 disconnect: P2 will still trigger the timeout.
+        // timeoutTriggered prevents repeat calls every second once remaining hits 0.
+        if (remaining === 0 && !timeoutTriggered) {
+          timeoutTriggered = true;
           handleTimeout();
         }
       }, 1000);
@@ -107,19 +120,22 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
         const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
         const start = chars[Math.floor(Math.random() * chars.length)];
         const end = chars[Math.floor(Math.random() * chars.length)];
-        
+
         const matchRef = ref(db, `matches/${matchId}`);
-        await update(matchRef, {
-          matchState: 'GUESSING',
-          startLetter: start,
-          endLetter: end,
-          roundStartTime: Date.now(),
-          player1Letter: null,
-          player2Letter: null
+        await runTransaction(matchRef, (current) => {
+          // Abort if state already advanced (timer fired after state changed)
+          if (current === null) return current;
+          if (current.matchState !== 'PICKING_LETTERS') return;
+          current.matchState = 'GUESSING';
+          current.startLetter = start;
+          current.endLetter = end;
+          current.roundStartTime = Date.now();
+          current.player1Letter = null;
+          current.player2Letter = null;
+          return current;
         });
       };
-      
-      // Small delay for smooth transition feel
+
       const timer = setTimeout(generateSystemLetters, 800);
       return () => clearTimeout(timer);
     }
@@ -127,9 +143,12 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
 
   const handleTimeout = async () => {
     const matchRef = ref(db, `matches/${matchId}`);
-    await update(matchRef, {
-      matchState: 'ENDED_ROUND',
-      lastRoundResult: { reason: 'timeout', winnerId: null }
+    await runTransaction(matchRef, (current) => {
+      if (current === null) return current;
+      if (current.matchState !== 'GUESSING') return; // already ended — abort
+      current.matchState = 'ENDED_ROUND';
+      current.lastRoundResult = { reason: 'timeout', winnerId: null };
+      return current;
     });
   };
 
@@ -137,167 +156,143 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
     // Focus the holding input immediately (still inside the click handler /
     // user-gesture) so iOS keeps the keyboard open while we wait for Firebase.
     holdingRef.current?.focus();
-    if (letter.length === 1 && /^[A-Z]$/.test(letter)) {
-      const matchRef = ref(db, `matches/${matchId}`);
-      const updates = {};
-      if (isP1) updates.player1Letter = letter;
-      else updates.player2Letter = letter;
+    if (letter.length !== 1 || !/^[A-Z]$/.test(letter)) return;
 
-      await update(matchRef, updates);
-
-      // Check if both locked
-      const snapshot = await get(matchRef);
-      const data = snapshot.val();
-      if (data.player1Letter && data.player2Letter) {
-        await update(matchRef, {
-          matchState: 'GUESSING',
-          startLetter: data.player1Role === 'START' ? data.player1Letter : data.player2Letter,
-          endLetter: data.player1Role === 'END' ? data.player1Letter : data.player2Letter,
-          roundStartTime: Date.now()
-        });
+    const matchRef = ref(db, `matches/${matchId}`);
+    await runTransaction(matchRef, (current) => {
+      if (current === null) return current;
+      if (current.matchState !== 'PICKING_LETTERS') return; // state changed — abort
+      const myLetterKey = user.uid === current.player1Id ? 'player1Letter' : 'player2Letter';
+      if (current[myLetterKey]) return; // already locked — idempotent guard
+      current[myLetterKey] = letter;
+      // Transition to GUESSING atomically once both letters are locked
+      if (current.player1Letter && current.player2Letter) {
+        current.matchState = 'GUESSING';
+        current.startLetter = current.player1Role === 'START' ? current.player1Letter : current.player2Letter;
+        current.endLetter = current.player1Role === 'END' ? current.player1Letter : current.player2Letter;
+        current.roundStartTime = Date.now();
       }
-      setLetter('');
-    }
+      return current;
+    });
+    setLetter('');
   };
 
   const submitWord = async (e) => {
     e.preventDefault();
+    if (submittingRef.current) return;
+
     const cleanWord = word.trim().toUpperCase();
 
-    if (dictLoading) {
-      setErrorMsg('Dictionary is still loading...');
-      return;
-    }
-    if (cleanWord.length < (matchData.minWordLength || 3)) {
-      setErrorMsg(`Minimum length is ${matchData.minWordLength || 3}`);
-      return;
-    }
-    if (cleanWord[0] !== matchData.startLetter || cleanWord[cleanWord.length - 1] !== matchData.endLetter) {
-      setErrorMsg(`Must start with ${matchData.startLetter} and end with ${matchData.endLetter}`);
-      return;
-    }
-    if (!dictionary.has(cleanWord)) {
-      setErrorMsg("Not a valid word");
-      return;
-    }
+    if (dictLoading) { setErrorMsg('Dictionary is still loading...'); return; }
+    if (cleanWord.length < (matchData.minWordLength || 3)) { setErrorMsg(`Minimum length is ${matchData.minWordLength || 3}`); return; }
+    if (cleanWord[0] !== matchData.startLetter || cleanWord[cleanWord.length - 1] !== matchData.endLetter) { setErrorMsg(`Must start with ${matchData.startLetter} and end with ${matchData.endLetter}`); return; }
+    if (!dictionary.has(cleanWord)) { setErrorMsg('Not a valid word'); return; }
 
-    // WINNER FOUND
-    // 1. UPDATE DB IMMEDIATELY (Instant Win Dialog < 100ms)
+    submittingRef.current = true;
     const matchRef = ref(db, `matches/${matchId}`);
-    const newScores = isP1
-      ? { player1Score: (matchData.player1Score || 0) + 1, player2Score: (matchData.player2Score || 0) }
-      : { player1Score: (matchData.player1Score || 0), player2Score: (matchData.player2Score || 0) + 1 };
 
-    const isGameOver = (newScores.player1Score >= winTarget || newScores.player2Score >= winTarget);
-    const gameWonUpdates = isGameOver ? {
-      player1GamesWon: (matchData.player1GamesWon || 0) + (isP1 ? 1 : 0),
-      player2GamesWon: (matchData.player2GamesWon || 0) + (!isP1 ? 1 : 0),
-    } : {};
+    try {
+      // Atomic CAS: only one player can end the round, even under simultaneous submission.
+      const result = await runTransaction(matchRef, (current) => {
+        if (current === null) return current;
+        if (current.matchState !== 'GUESSING') return; // already ended — abort
 
-    // When a game ends, append an entry to game_history keyed by game number
-    const gameNumber = (matchData.player1GamesWon || 0) + (matchData.player2GamesWon || 0) + 1;
-    const historyEntry = isGameOver ? {
-      [`game_history/${gameNumber}`]: {
-        player1Score: newScores.player1Score,
-        player2Score: newScores.player2Score,
-        winnerId: user.uid,
-      }
-    } : {};
+        const submitterIsP1 = user.uid === current.player1Id;
+        const p1Score = (current.player1Score || 0) + (submitterIsP1 ? 1 : 0);
+        const p2Score = (current.player2Score || 0) + (submitterIsP1 ? 0 : 1);
+        const currentWinTarget = current.winTarget || 5;
+        const isGameOver = p1Score >= currentWinTarget || p2Score >= currentWinTarget;
 
-    // Build player stats update for current user
-    const playerStatsWrite = (async () => {
-      try {
-        const statsRef = doc(firestore, 'users', user.uid);
-        const wordsDocRef = doc(firestore, 'user_words', user.uid);
-        const mode = matchData.mode || 'versus';
-        const safeWord = cleanWord.toUpperCase();
+        current.player1Score = p1Score;
+        current.player2Score = p2Score;
+        current.lastRoundResult = { winnerId: user.uid, word: cleanWord, translation: null, reason: 'correct' };
 
-        // 1. Update the word bank (word counts)
-        // We use setDoc with merge:true to ensure the 'words' map is updated/created correctly
-        await setDoc(wordsDocRef, {
-          words: {
-            [safeWord]: increment(1)
-          }
-        }, { merge: true });
-
-        // 2. Fetch the updated bank to sync records in the profile
-        const wordsSnap = await getDoc(wordsDocRef);
-        if (wordsSnap.exists()) {
-          const words = wordsSnap.data().words || {};
-          const wordEntries = Object.entries(words);
-          
-          if (wordEntries.length > 0) {
-            const mostUsed = wordEntries.reduce((a, b) => {
-              // Handle potential FieldValue objects if they haven't been resolved (rare)
-              const aCount = typeof a[1] === 'number' ? a[1] : 0;
-              const bCount = typeof b[1] === 'number' ? b[1] : 0;
-              return bCount > aCount ? b : a;
-            });
-
-            const longest = wordEntries.reduce((a, b) => b[0].length > a[0].length ? b : a);
-            
-            // 3. Batch all stats updates into one write
-            await updateDoc(statsRef, {
-              'stats.total.wordsFormed': increment(1),
-              [`stats.${mode}.wordsFormed`]: increment(1),
-              'stats.total.mostUsedWord': mostUsed[0],
-              'stats.total.mostUsedWordCount': mostUsed[1],
-              'stats.total.longestWord': longest[0],
-              'stats.total.longestWordLen': longest[0].length,
-              'stats.total.uniqueWords': wordEntries.length
-            });
-          }
+        if (isGameOver) {
+          current.matchState = 'GAME_OVER';
+          current.winnerId = user.uid;
+          const gameNumber = (current.player1GamesWon || 0) + (current.player2GamesWon || 0) + 1;
+          if (submitterIsP1) current.player1GamesWon = (current.player1GamesWon || 0) + 1;
+          else current.player2GamesWon = (current.player2GamesWon || 0) + 1;
+          if (!current.game_history) current.game_history = {};
+          current.game_history[gameNumber] = { player1Score: p1Score, player2Score: p2Score, winnerId: user.uid };
+        } else {
+          current.matchState = 'ENDED_ROUND';
+          current.winnerId = null;
         }
-      } catch (err) {
-        console.error('playerStatsWrite failed:', err);
-      }
-    })();
 
+        return current;
+      });
 
-    await Promise.all([
-      update(matchRef, {
-        ...newScores,
-        ...gameWonUpdates,
-        ...historyEntry,
-        matchState: isGameOver ? 'GAME_OVER' : 'ENDED_ROUND',
-        winnerId: isGameOver ? user.uid : null,
-        lastRoundResult: {
-          winnerId: user.uid,
-          word: cleanWord,
-          translation: null,
-          reason: 'correct'
+      if (!result.committed) return; // Opponent already ended the round — silently discard
+
+      // Stats write is fire-and-forget: game state is already committed above.
+      // A stats failure doesn't affect match progression.
+      (async () => {
+        try {
+          const statsRef = doc(firestore, 'users', user.uid);
+          const wordsDocRef = doc(firestore, 'user_words', user.uid);
+          const mode = matchData.mode || 'versus';
+
+          await setDoc(wordsDocRef, { words: { [cleanWord]: increment(1) } }, { merge: true });
+
+          const wordsSnap = await getDoc(wordsDocRef);
+          if (wordsSnap.exists()) {
+            const words = wordsSnap.data().words || {};
+            const wordEntries = Object.entries(words);
+            if (wordEntries.length > 0) {
+              const mostUsed = wordEntries.reduce((a, b) => {
+                const aCount = typeof a[1] === 'number' ? a[1] : 0;
+                const bCount = typeof b[1] === 'number' ? b[1] : 0;
+                return bCount > aCount ? b : a;
+              });
+              const longest = wordEntries.reduce((a, b) => b[0].length > a[0].length ? b : a);
+              await updateDoc(statsRef, {
+                'stats.total.wordsFormed': increment(1),
+                [`stats.${mode}.wordsFormed`]: increment(1),
+                'stats.total.mostUsedWord': mostUsed[0],
+                'stats.total.mostUsedWordCount': mostUsed[1],
+                'stats.total.longestWord': longest[0],
+                'stats.total.longestWordLen': longest[0].length,
+                'stats.total.uniqueWords': wordEntries.length
+              });
+            }
+          }
+        } catch (err) {
+          console.error('playerStatsWrite failed:', err);
         }
-      }),
-      playerStatsWrite,
-    ]);
+      })();
 
-    // 2. FETCH TRANSLATION ASYNC
-    const targetLang = profile?.settings?.wordTranslationLang || 'zh-TW';
-    const translation = await getTranslation(cleanWord, targetLang);
+      // Fetch translation and patch it in — but only if lastRoundResult still belongs
+      // to this word. A slow network could return after nextRound() already cleared/replaced
+      // lastRoundResult, which would corrupt the new round's result data.
+      const targetLang = profile?.settings?.wordTranslationLang || 'zh-TW';
+      const translation = await getTranslation(cleanWord, targetLang);
+      await runTransaction(matchRef, (current) => {
+        if (current === null) return current;
+        if (!current.lastRoundResult || current.lastRoundResult.word !== cleanWord) return;
+        current.lastRoundResult.translation = translation;
+        return current;
+      });
 
-    // 3. UPDATE DB WITH TRANSLATION (Popping in shortly after)
-    await update(matchRef, {
-      'lastRoundResult/translation': translation
-    });
+    } finally {
+      submittingRef.current = false;
+    }
   };
 
   const handlePass = async () => {
     const matchRef = ref(db, `matches/${matchId}`);
-    const updates = {};
-    if (isP1) updates.player1Pass = true;
-    else updates.player2Pass = true;
-
-    await update(matchRef, updates);
-
-    // Check if both passed
-    const snapshot = await get(matchRef);
-    const data = snapshot.val();
-    if (data.player1Pass && data.player2Pass) {
-      await update(matchRef, {
-        matchState: 'ENDED_ROUND',
-        lastRoundResult: { reason: 'pass', winnerId: null }
-      });
-    }
+    await runTransaction(matchRef, (current) => {
+      if (current === null) return current;
+      if (current.matchState !== 'GUESSING') return; // already ended — abort
+      const myPassKey = user.uid === current.player1Id ? 'player1Pass' : 'player2Pass';
+      current[myPassKey] = true;
+      // Atomically transition if both players have now passed
+      if (current.player1Pass && current.player2Pass) {
+        current.matchState = 'ENDED_ROUND';
+        current.lastRoundResult = { reason: 'pass', winnerId: null };
+      }
+      return current;
+    });
   };
 
   const nextRound = async () => {
@@ -305,16 +300,21 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
     // Firebase/React re-render triggers the next round's real input.
     holdingRef.current?.focus();
     const matchRef = ref(db, `matches/${matchId}`);
-    await update(matchRef, {
-      matchState: 'PICKING_LETTERS',
-      player1Letter: null,
-      player2Letter: null,
-      player1Pass: null,
-      player2Pass: null,
-      player1Role: matchData.player1Role === 'START' ? 'END' : 'START',
-      player2Role: matchData.player2Role === 'START' ? 'END' : 'START',
-      currentRound: (matchData.currentRound || 1) + 1,
-      lastRoundResult: null
+    // Transaction ensures both players clicking "Continue" simultaneously is idempotent
+    // and uses server state for role-flip (not stale React state).
+    await runTransaction(matchRef, (current) => {
+      if (current === null) return current;
+      if (current.matchState !== 'ENDED_ROUND') return; // already transitioned — abort
+      current.matchState = 'PICKING_LETTERS';
+      current.player1Letter = null;
+      current.player2Letter = null;
+      current.player1Pass = null;
+      current.player2Pass = null;
+      current.player1Role = current.player1Role === 'START' ? 'END' : 'START';
+      current.player2Role = current.player2Role === 'START' ? 'END' : 'START';
+      current.currentRound = (current.currentRound || 1) + 1;
+      current.lastRoundResult = null;
+      return current;
     });
   };
 
