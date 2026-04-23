@@ -89,7 +89,9 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
   useEffect(() => {
     if (matchData.matchState === 'GUESSING' && matchData.roundStartTime) {
       const calcRemaining = () => {
-        const elapsed = Math.floor((Date.now() - matchData.roundStartTime) / 1000);
+        // Use Math.max(0, ...) for elapsed to prevent clock skew between players
+        // from producing a negative elapsed time (which would result in > 99 seconds).
+        const elapsed = Math.max(0, Math.floor((Date.now() - matchData.roundStartTime) / 1000));
         return Math.max(0, 99 - elapsed);
       };
       
@@ -221,7 +223,7 @@ export default function GameBoard({ user, profile, matchId, matchData }) {
         }
 
         return current;
-      });
+      }, { applyLocally: false });
 
       if (!result.committed) return; // Opponent already ended the round — silently discard
 

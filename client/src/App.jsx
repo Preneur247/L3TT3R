@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import { auth, db, firestore } from './firebase';
 import { isSignInWithEmailLink, signInWithEmailLink, signOut } from 'firebase/auth';
 import { doc, getDoc, setDoc, updateDoc, deleteDoc, increment, onSnapshot } from 'firebase/firestore';
-import { ref, onValue, runTransaction } from 'firebase/database';
+import { ref, onValue, runTransaction, remove } from 'firebase/database';
 import Lobby from './components/Lobby';
 import GameBoard from './components/GameBoard';
 import SetupProfile from './components/SetupProfile';
@@ -16,11 +16,13 @@ function App() {
   const [currentMatchId, setCurrentMatchId] = useState(null);
   // Only set when the user intentionally clicks "Back to Room" — never from currentMatchId directly
   const [returnRoomMatchId, setReturnRoomMatchId] = useState(null);
+  const [wordBankKey, setWordBankKey] = useState(0);
 
   const [profile, setProfile] = useState(null);
   const gamesPlayedRecordedRef = useRef(null);
   const winsRecordedRef = useRef(null);
   const profileUnsubRef = useRef(null);
+  const abortedMatchRef = useRef(null); // tracks matches we've already force-aborted
   // null = not started, 'onboarding' = show onboarding, 'ready' = authenticated
   const [authState, setAuthState] = useState('checking');
 
@@ -186,15 +188,29 @@ function App() {
 
       setMatchData(data);
 
+      const activeGameStates = ['PICKING_LETTERS', 'GUESSING', 'ENDED_ROUND'];
+      const isActiveGame = activeGameStates.includes(data.matchState);
+      const mode = data.mode || 'versus';
+
+      // Versus safety check: if a player dropped out during an active game,
+      // delete the match so all clients are sent back to the lobby.
+      if (isActiveGame && mode === 'versus' && !data.player2Id && abortedMatchRef.current !== currentMatchId) {
+        abortedMatchRef.current = currentMatchId;
+        remove(ref(db, `matches/${currentMatchId}`)).catch(() => {});
+        return; // the deletion will trigger this listener again with data=null → lobby
+      }
+
       if (data.winnerId) {
         setGameState('GAME_OVER');
-      } else if (data.matchState === 'PICKING_LETTERS' || data.matchState === 'GUESSING' || data.matchState === 'ENDED_ROUND') {
+      } else if (isActiveGame) {
         setGameState('PLAYING');
       } else if (data.matchState === 'ROOM_SETUP' || data.matchState === 'WAITING') {
         // These states should show the Lobby with the matching Modal open
         setGameState('LOBBY');
+        setWordBankKey(k => k + 1);
       } else {
         setGameState('LOBBY');
+        setWordBankKey(k => k + 1);
       }
     });
 
@@ -297,6 +313,7 @@ function App() {
             }}
             initialMatchId={returnRoomMatchId || (gameState === 'GAME_OVER' ? currentMatchId : null)}
             onRoomInitialized={() => setReturnRoomMatchId(null)}
+            wordBankKey={wordBankKey}
           />
         )}
 

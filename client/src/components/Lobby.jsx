@@ -66,7 +66,7 @@ const StatBlock = ({ label, value, color, glowColor, isWord = false }) => {
   );
 };
 
-export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoomInitialized }) {
+export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoomInitialized, wordBankKey = 0 }) {
   const [mode, setMode] = useState('versus');
   const [letterMode, setLetterMode] = useState('players'); // 'system' | 'players'
   const [status, setStatus] = useState('idle');           // idle | searching | error
@@ -85,6 +85,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
   const roomCodeRef = useRef(null);      // mirrors roomCode for cancelRoom cleanup
   const matchDataRef = useRef(null);     // mirrors matchData to detect prev state in listener
   const usernameCacheRef = useRef({});   // prevents refetching usernames on every setting change
+  const seekingSlotRef = useRef(null);   // tracks the Quick Match slot so cancelRoom can clean it up
   const [roomTab, setRoomTab] = useState('room');
   const [statsView, setStatsView] = useState('current');
   const [statTab, setStatTab] = useState('total');
@@ -160,6 +161,14 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
     }
   }, [showWordBank, wordBank, user?.uid]);
 
+  // Invalidate word bank cache whenever the player returns from a game
+  // so the next Word Bank open always shows fresh data.
+  useEffect(() => {
+    if (wordBankKey > 0) {
+      setWordBank(null);
+    }
+  }, [wordBankKey]);
+
   const updateUserSetting = async (key, value) => {
     if (!user) return;
     try {
@@ -177,6 +186,10 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       roomListenerRef.current();
       roomListenerRef.current = null;
     }
+
+    // Clear the mirror so any stale matchData from createRoom (silent mode)
+    // doesn't cause a false-positive "room deleted" on the first null snapshot.
+    matchDataRef.current = null;
 
     const matchRef = ref(db, `matches/${mId}`);
 
@@ -215,8 +228,24 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
         setShowRoomModal(true);
         setPendingMatchId(mId);
 
-        // Ensure public match is listed in the search pool if it reverted to WAITING (guest dropped)
+        // Unified Approach: If the room is public and waiting for a guest,
+        // try to occupy the 'seeking' slot so newcomers find us immediately.
         if (data.matchState === 'WAITING' && data.isPublic && data.player1Id === user.uid) {
+          const slotRef = ref(db, `lobby/seeking/${data.mode || 'versus'}`);
+          runTransaction(slotRef, (current) => {
+            // Only occupy if slot is empty or we already hold it
+            if (!current || current.status === 'matched' || current.matchId === mId) {
+              return { matchId: mId, hostId: user.uid, status: 'waiting' };
+            }
+            return; // Someone else is already featured
+          }).then((res) => {
+            if (res.committed) {
+              seekingSlotRef.current = slotRef;
+              onDisconnect(slotRef).remove();
+            }
+          });
+
+          // Also keep the legacy index for backup/compatibility
           const publicRef = ref(db, `lobby/waiting_matches/${data.mode || 'versus'}/${mId}`);
           set(publicRef, true).catch(() => {});
           onDisconnect(publicRef).remove();
@@ -275,12 +304,12 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
         return defaultName;
       };
 
-      const p1Username = await fetchUsername(data.player1Id, 'Host');
-      players.push({ uid: data.player1Id, username: p1Username, isHost: true, isLoading: false });
+      const p1Username = await fetchUsername(data.player1Id, data.player1Id === user.uid ? (profile?.username || 'You') : '...');
+      players.push({ uid: data.player1Id, username: p1Username, isHost: true, isLoading: (p1Username === '...') });
 
       if (data.player2Id) {
-        const p2Username = await fetchUsername(data.player2Id, 'Player 2');
-        players.push({ uid: data.player2Id, username: p2Username, isHost: false, isLoading: false });
+        const p2Username = await fetchUsername(data.player2Id, data.player2Id === user.uid ? (profile?.username || 'You') : '...');
+        players.push({ uid: data.player2Id, username: p2Username, isHost: false, isLoading: (p2Username === '...') });
       }
 
       // Abort if the user left the room during the async fetch
@@ -345,6 +374,14 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
     roomMatchIdRef.current = null;
     roomCodeRef.current = null;
 
+    // Clean up the Quick Match seeking slot if we registered one as host
+    if (seekingSlotRef.current) {
+      const slotRef = seekingSlotRef.current;
+      seekingSlotRef.current = null;
+      onDisconnect(slotRef).cancel().catch(() => {});
+      remove(slotRef).catch(() => {});
+    }
+
     try {
       if (mId) {
         const matchRef = ref(db, `matches/${mId}`);
@@ -364,8 +401,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
           if (mCode) cleanupTasks.push(remove(codeRef).catch(() => {}));
           await Promise.all(cleanupTasks);
         } else {
-          // Guest leaving: execute transaction immediately without waiting for cleanup
-          // to make the departure feel "smooth" and instant for the host.
+          // Guest leaving: try to cleanly exit ROOM_SETUP state first.
           const leaveResult = await runTransaction(matchRef, (current) => {
             if (current === null) return current;
             if (current.matchState !== 'ROOM_SETUP') return; // game already started — abort
@@ -374,8 +410,14 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
             current.matchState = 'WAITING';
             return current;
           });
-          
-          if (leaveResult.committed && wasPublic) {
+
+          if (!leaveResult.committed) {
+            // Transaction aborted — the host started the game just before we left.
+            // Forcibly remove ourselves from the active match. This triggers the
+            // App.jsx dropout guard (!data.player2Id during active game), which
+            // will delete the match and send the host back to the lobby too.
+            await update(matchRef, { player2Id: null }).catch(() => {});
+          } else if (wasPublic) {
             cleanupTasks.push(set(publicRef, true));
           }
           await Promise.all(cleanupTasks);
@@ -387,14 +429,8 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
   };
 
   const startGame = async () => {
-    if (roomListenerRef.current) {
-      roomListenerRef.current();
-      roomListenerRef.current = null;
-    }
     const mId = roomMatchIdRef.current || pendingMatchId;
     const mCode = roomCodeRef.current || roomCode;
-    roomMatchIdRef.current = null;
-    roomCodeRef.current = null;
     try {
       const startUpdates = {
         matchState: 'PICKING_LETTERS',
@@ -408,19 +444,34 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
         letterMode: letterMode
       };
 
-      // Guard against double-start and against guest having just disconnected
+      // Guard against double-start and against guest having just disconnected.
+      // IMPORTANT: Do NOT unsubscribe the room listener before this transaction.
+      // If the transaction aborts (P2 left), we need the listener to still be active
+      // so the host sees the WAITING state and the UI recovers gracefully.
       const result = await runTransaction(ref(db, `matches/${mId}`), (current) => {
         if (current === null) return current;
         if (current.matchState !== 'ROOM_SETUP') return; // already started — abort
-        if (!current.player2Id) return; // guest disconnected between button enable and click — abort
+        if (!current.player2Id) return; // guest disconnected — abort
         return { ...current, ...startUpdates };
       });
 
-      if (!result.committed) return; // game already started or P2 gone — do nothing
+      if (!result.committed) {
+        // P2 left just as we clicked Start. Re-attach the room listener so the
+        // host sees the WAITING state and is NOT stuck in a broken game view.
+        initializeRoomListener(mId);
+        return;
+      }
+
+      // Transaction committed — game is starting. NOW it is safe to unsubscribe
+      // the room listener and hand control to the App.jsx game listener.
+      if (roomListenerRef.current) {
+        roomListenerRef.current();
+        roomListenerRef.current = null;
+      }
+      roomMatchIdRef.current = null;
+      roomCodeRef.current = null;
 
       // Ensure the match is destroyed if the host disconnects during gameplay.
-      // The host's handler is already remove() from creation, but we explicitly re-apply
-      // it here just to be safe and clear.
       onDisconnect(ref(db, `matches/${mId}`)).remove().catch(() => {});
 
       // Clean up room index, public pool, and their onDisconnect listeners
@@ -431,6 +482,14 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       const publicRef = ref(db, `lobby/waiting_matches/${mode}/${mId}`);
       onDisconnect(publicRef).cancel().catch(() => {});
       await remove(publicRef).catch(() => {});
+
+      // Clear the seeking slot if this was a Quick Match game (guest already removed it,
+      // but clean up ours just in case the guest joined via code instead)
+      if (seekingSlotRef.current) {
+        onDisconnect(seekingSlotRef.current).cancel().catch(() => {});
+        remove(seekingSlotRef.current).catch(() => {});
+        seekingSlotRef.current = null;
+      }
 
       setMatchId(mId, result.snapshot.val());
     } catch (err) {
@@ -516,63 +575,108 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
 
   const findMatch = async () => {
     setStatus('searching');
-    setMatchData(null);
-    matchDataRef.current = null;
-    setRoomPlayers([]);
     try {
-      // 1. First, look for an existing public room
-      const publicWaitingRef = ref(db, `lobby/waiting_matches/${mode}`);
-      const snap = await get(publicWaitingRef);
+      // Create our own room silently first.
+      await createRoom(true, { silent: true });
+      const myMatchId = roomMatchIdRef.current;
+      const myCode = roomCodeRef.current;
 
-      if (snap.exists()) {
-        const waitingRooms = snap.val();
-        const matchIds = Object.keys(waitingRooms);
+      const slotRef = ref(db, `lobby/seeking/${mode}`);
+      onDisconnect(slotRef).remove();
 
-        // Try to join rooms until one works
-        for (const mId of matchIds) {
-          const matchRef = ref(db, `matches/${mId}`);
-
-          // Pre-fetch to avoid transaction aborts on initial null
-          await get(matchRef);
-
-          const result = await runTransaction(matchRef, (current) => {
-            if (current === null) return current;
-            if (current.matchState === 'WAITING' && !current.player2Id) {
-              current.player2Id = user.uid;
-              current.matchState = 'ROOM_SETUP';
-              current.player1Score = 0;
-              current.player2Score = 0;
-              current.player1GamesWon = 0;
-              current.player2GamesWon = 0;
-              return current;
-            }
-            return;
-          });
-
-          if (result.committed && result.snapshot.exists()) {
-            // Successfully joined an existing room!
-            await remove(ref(db, `lobby/waiting_matches/${mode}/${mId}`)).catch(() => { });
-            setPendingMatchId(mId);
-            roomMatchIdRef.current = mId;
-            
-            // Guest onDisconnect: clear self and reset state if connection lost
-            onDisconnect(matchRef).update({
-              player2Id: null,
-              matchState: 'WAITING'
-            });
-            
-            setMatchData(result.snapshot.val());
-            initializeRoomListener(mId);
-            setRoomTab('room');
-            setShowRoomModal(true);
-            setStatus('idle');
-            return;
-          }
+      // The single point of truth: check the 'seeking' slot via transaction.
+      const slotResult = await runTransaction(slotRef, (current) => {
+        if (!current || current.status === 'matched') {
+          // Slot is free — register as the waiting host
+          return { matchId: myMatchId, hostId: user.uid, status: 'waiting' };
         }
+        if (current.hostId === user.uid) return current;
+        // Another player is waiting — mark as matched so we know their matchId
+        return { ...current, status: 'matched', guestId: user.uid };
+      });
+
+      const slotVal = slotResult.snapshot.val();
+
+      if (!slotVal || slotVal.matchId === myMatchId) {
+        // We registered as host
+        seekingSlotRef.current = slotRef;
+        setRoomPlayers([{ uid: user.uid, username: profile?.username || 'You', isHost: true }]);
+        initializeRoomListener(myMatchId);
+        setRoomTab('room');
+        setShowRoomModal(true);
+        setStatus('idle');
+        return;
       }
 
-      // 2. If no joinable public room found, create a new PUBLIC room and wait
-      await createRoom(true);
+      // We're the guest — join the featured host's room
+      const hostMatchId = slotVal.matchId;
+      const hostMatchRef = ref(db, `matches/${hostMatchId}`);
+      
+      let hostSnap = await get(hostMatchRef);
+      if (!hostSnap.exists()) {
+        await new Promise(r => setTimeout(r, 200));
+        hostSnap = await get(hostMatchRef);
+      }
+
+      if (!hostSnap.exists()) {
+        // Fallback to host
+        seekingSlotRef.current = slotRef;
+        await set(slotRef, { matchId: myMatchId, hostId: user.uid, status: 'waiting' });
+        setRoomPlayers([{ uid: user.uid, username: profile?.username || 'You', isHost: true }]);
+        initializeRoomListener(myMatchId);
+        setRoomTab('room');
+        setShowRoomModal(true);
+        setStatus('idle');
+        return;
+      }
+
+      const joinResult = await runTransaction(hostMatchRef, (current) => {
+        if (current === null) return current;
+        if (current.matchState !== 'WAITING' || current.player2Id) return;
+        current.player2Id = user.uid;
+        current.matchState = 'ROOM_SETUP';
+        current.player1Score = 0;
+        current.player2Score = 0;
+        current.player1GamesWon = 0;
+        current.player2GamesWon = 0;
+        return current;
+      });
+
+      if (joinResult.committed && joinResult.snapshot.exists()) {
+        // Clean up our own unused room
+        const myMatchRef = ref(db, `matches/${myMatchId}`);
+        const myPublicRef = ref(db, `lobby/waiting_matches/${mode}/${myMatchId}`);
+        onDisconnect(myMatchRef).cancel().catch(() => {});
+        if (myCode) onDisconnect(ref(db, `room_codes/${myCode}`)).cancel().catch(() => {});
+        onDisconnect(myPublicRef).cancel().catch(() => {});
+        onDisconnect(slotRef).cancel().catch(() => {});
+        await Promise.all([
+          remove(myMatchRef).catch(() => {}),
+          remove(myPublicRef).catch(() => {}),
+          myCode ? remove(ref(db, `room_codes/${myCode}`)).catch(() => {}) : Promise.resolve(),
+          remove(slotRef).catch(() => {}) // Clear the slot now that the match is made
+        ]);
+
+        roomMatchIdRef.current = hostMatchId;
+        roomCodeRef.current = null;
+        setRoomCode(null);
+        setPendingMatchId(hostMatchId);
+        onDisconnect(hostMatchRef).update({ player2Id: null, matchState: 'WAITING' });
+
+        initializeRoomListener(hostMatchId);
+        setRoomTab('room');
+        setShowRoomModal(true);
+        setStatus('idle');
+        return;
+      }
+
+      // Final fallback: if join failed, become a host yourself
+      seekingSlotRef.current = slotRef;
+      await set(slotRef, { matchId: myMatchId, hostId: user.uid, status: 'waiting' });
+      setRoomPlayers([{ uid: user.uid, username: profile?.username || 'You', isHost: true }]);
+      initializeRoomListener(myMatchId);
+      setRoomTab('room');
+      setShowRoomModal(true);
       setStatus('idle');
     } catch (err) {
       console.error('Find match error:', err);
@@ -583,16 +687,13 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
 
 
   // ── Versus: create private room ───────────────────────────────────────────
-  const createRoom = async (isPublic = false) => {
+  // silent=true: used by findMatch so the modal only opens once the role is confirmed.
+  const createRoom = async (isPublic = false, { silent = false } = {}) => {
     const code = generateRoomCode();
     const matchId = `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    // Clear stale state and set refs synchronously before any await
-    setMatchData(null);
-    matchDataRef.current = null;
     roomMatchIdRef.current = matchId;
     roomCodeRef.current = code;
     setRoomCode(code);
-    setRoomPlayers([{ uid: user.uid, username: profile?.username || 'You', isHost: true }]);
     setRoomTab('room');
 
     const initialData = {
@@ -610,7 +711,15 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
     };
 
     setMatchData(initialData);
-    setShowRoomModal(true);
+    matchDataRef.current = initialData;
+
+    // In silent mode (Quick Match), don't open the modal yet. findMatch will do
+    // it once after the role (host or guest) is fully confirmed — no flash.
+    if (!silent) {
+      setRoomPlayers([{ uid: user.uid, username: profile?.username || 'You', isHost: true }]);
+      setShowRoomModal(true);
+    }
+
     try {
       const matchRef = ref(db, `matches/${matchId}`);
       const codeRef = ref(db, `room_codes/${code}`);
@@ -626,7 +735,6 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
 
       // Check if user clicked cancel during the await
       if (roomMatchIdRef.current !== matchId) {
-        // They cancelled! Make sure the room is deleted since cancelRoom might have missed it
         await remove(matchRef);
         if (isPublic) await remove(publicRef);
         await remove(codeRef);
@@ -636,7 +744,10 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       onDisconnect(matchRef).remove();
       onDisconnect(codeRef).remove();
       setPendingMatchId(matchId);
-      initializeRoomListener(matchId);
+
+      if (!silent) {
+        initializeRoomListener(matchId);
+      }
     } catch (err) {
       console.error('Create room error:', err);
       setShowRoomModal(false);
@@ -1174,7 +1285,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
                           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
                         )}
                         <span className="room-player-name" style={{ color: roomPlayers[0]?.isLoading ? 'var(--text-muted)' : 'inherit', fontStyle: roomPlayers[0]?.isLoading ? 'italic' : 'normal' }}>
-                          {roomPlayers[0]?.username || 'Host'}
+                          {roomPlayers[0]?.isLoading ? 'Loading...' : (roomPlayers[0]?.username || '...')}
                         </span>
                         <span className="room-player-badge">Host</span>
                       </div>
