@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.7] - 2026-04-23
+- **Persistent Game Room**: Matchmaking and Game Room states are now unified into a single persistent modal, eliminating the "flash" effect during transitions.
+- **Improved Loading States**: Added explicit loading spinners and placeholders for player slots to ensure the UI feels stable while fetching data.
+- **Fluid Layout**: Implemented CSS transitions for smooth height adjustments when entering or leaving matchmaking.
+
 ## [0.1.6] - 2026-04-23
 - **Smoother Gameplay**: Fixed several bugs that caused the screen to flash or menus to freeze when entering and leaving rooms quickly.
 - **Connection Handling**: The game now gracefully returns you to the main lobby if your opponent loses their internet connection during a match.

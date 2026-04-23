@@ -6,6 +6,12 @@
           ".read": "auth != null",
           ".write": "auth != null"
         }
+      },
+      "seeking": {
+        "$mode": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        }
       }
     },
     "room_codes": {
