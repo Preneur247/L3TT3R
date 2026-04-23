@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { doc, runTransaction } from 'firebase/firestore';
 import { signInAnonymously, sendSignInLinkToEmail, setPersistence, browserLocalPersistence } from 'firebase/auth';
 import { auth, firestore } from '../firebase';
+import Modal, { ModalBody, ModalFooter, ModalTitle } from './Modal';
 
 // Using global __APP_VERSION__ from vite.config.js
 
@@ -147,7 +148,7 @@ export default function SetupProfile({ onAuthComplete }) {
 
   return (
     <>
-      <div className="glass-card">
+      <div className="setup-profile-container">
         <div className="card-stack">
 
           <div style={{ textAlign: 'center' }}>
@@ -180,7 +181,7 @@ export default function SetupProfile({ onAuthComplete }) {
                 type="email"
                 value={email}
                 onChange={(e) => { setError(null); setEmail(e.target.value); }}
-                placeholder="email@example.com"
+                placeholder="player@l3tt3r.com"
                 autoFocus
                 className="glass-input no-transform"
               />
@@ -266,7 +267,7 @@ export default function SetupProfile({ onAuthComplete }) {
                 type="email"
                 value={email}
                 onChange={(e) => { setError(null); setEmail(e.target.value); }}
-                placeholder="email@example.com"
+                placeholder="player@l3tt3r.com"
                 autoFocus
                 className="glass-input no-transform"
               />
@@ -338,31 +339,28 @@ export default function SetupProfile({ onAuthComplete }) {
 
       {/* Settings Modal */}
       {showSettings && (
-        <div className="popup-overlay" onClick={() => setShowSettings(false)}>
-          <div className="rules-modal" onClick={e => e.stopPropagation()}>
-            <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', color: 'var(--glow-color)', marginBottom: '2rem', marginTop: 0 }}>
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-              Settings
-            </h2>
-            <div className="modal-body">
-              <div className="settings-group">
-                <label className="settings-label">App Interface</label>
-                <select className="glass-select" value="en" disabled>
-                  <option value="en">English</option>
-                </select>
-              </div>
-              <div className="settings-group">
-                <label className="settings-label">Word Translation</label>
-                <select className="glass-select" value="zh-TW" disabled>
-                  <option value="zh-TW">繁體中文</option>
-                </select>
-              </div>
+        <Modal onClose={() => setShowSettings(false)}>
+          <ModalTitle icon={<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>}>
+            Settings
+          </ModalTitle>
+          <ModalBody>
+            <div className="settings-group">
+              <label className="settings-label">App Interface</label>
+              <select className="glass-select" value="en" disabled>
+                <option value="en">English</option>
+              </select>
             </div>
-            <div style={{ textAlign: 'center', marginTop: '1.5rem', flexShrink: 0 }}>
-              <button className="primary" onClick={() => setShowSettings(false)}>Close</button>
+            <div className="settings-group">
+              <label className="settings-label">Word Translation</label>
+              <select className="glass-select" value="zh-TW" disabled>
+                <option value="zh-TW">繁體中文</option>
+              </select>
             </div>
-          </div>
-        </div>
+          </ModalBody>
+          <ModalFooter balanced>
+            <button className="primary" onClick={() => setShowSettings(false)}>Close</button>
+          </ModalFooter>
+        </Modal>
       )}
     </>
   );

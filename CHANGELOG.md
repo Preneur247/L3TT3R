@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.8] - 2026-04-23
+- Smoothed how windows resize so modal and card heights grow and shrink naturally with content changes.
+- Improved modal consistency by adding clearer divider lines above action buttons across utility flows.
+- Refined Game Room setup visuals: slider states, player count badge, and spacing now match the rest of the settings UI.
+
 ## [0.1.7] - 2026-04-23
 - **Persistent Game Room**: Matchmaking and Game Room states are now unified into a single persistent modal, eliminating the "flash" effect during transitions.
 - **Improved Loading States**: Added explicit loading spinners and placeholders for player slots to ensure the UI feels stable while fetching data.

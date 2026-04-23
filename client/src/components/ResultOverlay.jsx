@@ -1,4 +1,4 @@
-import { createPortal } from 'react-dom';
+import Modal from './Modal';
 
 /**
  * ResultOverlay
@@ -37,58 +37,60 @@ export default function ResultOverlay({
     return isWinner ? '' : 'loss';
   };
 
-  return createPortal(
-    <div className="popup-overlay">
-      <div className={`translation-popup ${getPopupClass()}`}>
-        <div className={`popup-title ${getResultClass()}`}>
-          {title}
-        </div>
-
-        {word && (
-          <div className="word-block">
-            <div 
-              className="word" 
-              style={{ 
-                fontSize: word.length > 15 ? '1.4rem' : word.length > 12 ? '1.8rem' : word.length > 9 ? '2.2rem' : '3rem',
-                transition: 'font-size 0.3s ease',
-                whiteSpace: 'nowrap',
-                overflow: 'hidden',
-                wordBreak: 'normal'
-              }}
-            >
-              {word}
-            </div>
-            <div className="chinese">
-              {translation ? (
-                translation
-              ) : (
-                <span className="translation-loading">
-                  <span className="spinner" /> Translating...
-                </span>
-              )}
-            </div>
-          </div>
-        )}
-
-        {scoreDisplay && (
-          <div className="popup-score">
-            {scoreDisplay}
-          </div>
-        )}
-
-        <div className={actions.length > 2 ? 'popup-actions-vertical' : 'modal-footer'}>
-          {actions.map((action, idx) => (
-            <button
-              key={idx}
-              className={`${action.isPrimary ? 'primary' : 'secondary'} btn-responsive`}
-              onClick={action.onClick}
-            >
-              {action.label}
-            </button>
-          ))}
-        </div>
+  return (
+    <Modal 
+      className={`translation-popup ${getPopupClass()}`} 
+      onClose={null} 
+      overlayClick={false}
+      style={{ padding: '3rem' }}
+    >
+      <div className={`popup-title ${getResultClass()}`}>
+        {title}
       </div>
-    </div>,
-    document.body
+
+      {word && (
+        <div className="word-block">
+          <div 
+            className="word" 
+            style={{ 
+              fontSize: word.length > 15 ? '1.4rem' : word.length > 12 ? '1.8rem' : word.length > 9 ? '2.2rem' : '3rem',
+              transition: 'font-size 0.3s ease',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              wordBreak: 'normal'
+            }}
+          >
+            {word}
+          </div>
+          <div className="chinese">
+            {translation ? (
+              translation
+            ) : (
+              <span className="translation-loading">
+                <span className="spinner" /> Translating...
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {scoreDisplay && (
+        <div className="popup-score">
+          {scoreDisplay}
+        </div>
+      )}
+
+      <div className={actions.length > 2 ? 'popup-actions-vertical' : 'modal-footer'}>
+        {actions.map((action, idx) => (
+          <button
+            key={idx}
+            className={`${action.isPrimary ? 'primary' : 'secondary'} btn-responsive`}
+            onClick={action.onClick}
+          >
+            {action.label}
+          </button>
+        ))}
+      </div>
+    </Modal>
   );
 }

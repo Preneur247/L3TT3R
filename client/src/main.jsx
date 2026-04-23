@@ -9,9 +9,21 @@ import './index.css'
 //  - .keyboard-open: enables compact CSS since media queries don't update on iOS
 //  - scroll lock: prevents iOS from nudging the page when inputs get focus
 const setAppHeight = () => {
-  const vh = window.visualViewport?.height ?? window.innerHeight;
-  document.documentElement.style.setProperty('--app-height', `${vh}px`);
-  const isKeyboardOpen = vh < 600;
+  const visualViewportHeight = window.visualViewport?.height ?? window.innerHeight;
+  const layoutViewportHeight = window.innerHeight;
+  const activeElement = document.activeElement;
+  const isTextInputFocused = Boolean(
+    activeElement &&
+    (
+      activeElement.tagName === 'INPUT' ||
+      activeElement.tagName === 'TEXTAREA' ||
+      activeElement.isContentEditable
+    )
+  );
+  const keyboardDelta = layoutViewportHeight - visualViewportHeight;
+  const isKeyboardOpen = isTextInputFocused && keyboardDelta > 120;
+
+  document.documentElement.style.setProperty('--app-height', `${visualViewportHeight}px`);
   document.documentElement.classList.toggle('keyboard-open', isKeyboardOpen);
   if (isKeyboardOpen) {
     clearTimeout(window._kbScrollTimer);

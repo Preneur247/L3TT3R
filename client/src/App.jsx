@@ -7,6 +7,7 @@ import Lobby from './components/Lobby';
 import GameBoard from './components/GameBoard';
 import SetupProfile from './components/SetupProfile';
 import ResultOverlay from './components/ResultOverlay';
+import AutoSizeCard from './components/AutoSizeCard';
 
 
 function App() {
@@ -279,24 +280,26 @@ function App() {
 
 
   if (authState === 'checking') {
-    return <div className="glass-card"><h1>L3TT3R</h1><div className="subtitle">Connecting...</div></div>;
+    return <AutoSizeCard><h1>L3TT3R</h1><div className="subtitle">Connecting...</div></AutoSizeCard>;
   }
 
   if (authState === 'onboarding') {
     return (
-      <SetupProfile
-        onAuthComplete={(authUser, profileData) => {
-          setUser(authUser);
-          setProfile(profileData);
-          setAuthState('ready');
-        }}
-      />
+      <AutoSizeCard measureKey={authState}>
+        <SetupProfile
+          onAuthComplete={(authUser, profileData) => {
+            setUser(authUser);
+            setProfile(profileData);
+            setAuthState('ready');
+          }}
+        />
+      </AutoSizeCard>
     );
   }
 
   return (
     <>
-      <div className="glass-card">
+      <AutoSizeCard measureKey={`${gameState}:${currentMatchId ?? 'none'}:${wordBankKey}`}>
         {/* H1 shown for connecting, matching, and in-game states only */}
         {(gameState !== 'LOBBY' && gameState !== 'GAME_OVER') && <h1>L3TT3R</h1>}
 
@@ -320,7 +323,7 @@ function App() {
         {gameState === 'PLAYING' && matchData && (
           <GameBoard user={user} profile={profile} matchId={currentMatchId} matchData={matchData} />
         )}
-      </div>
+      </AutoSizeCard>
 
       {gameState === 'GAME_OVER' && matchData && (
         <ResultOverlay
