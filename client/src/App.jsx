@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import { auth, db, firestore } from './firebase';
 import { isSignInWithEmailLink, signInWithEmailLink, signOut } from 'firebase/auth';
 import { doc, getDoc, setDoc, updateDoc, deleteDoc, increment, onSnapshot } from 'firebase/firestore';
-import { ref, onValue, update } from 'firebase/database';
+import { ref, onValue, runTransaction } from 'firebase/database';
 import Lobby from './components/Lobby';
 import GameBoard from './components/GameBoard';
 import SetupProfile from './components/SetupProfile';
@@ -318,23 +318,28 @@ function App() {
               onClick: async () => {
                 setReturnRoomMatchId(currentMatchId);
                 const matchRef = ref(db, `matches/${currentMatchId}`);
-                await update(matchRef, {
-                  matchState: 'ROOM_SETUP',
-                  winnerId: null,
-                  gameOverReason: null,
-                  player1Score: 0,
-                  player2Score: 0,
-                  player1Letter: null,
-                  player2Letter: null,
-                  player1Pass: null,
-                  player2Pass: null,
-                  player1Role: null,
-                  player2Role: null,
-                  startLetter: null,
-                  endLetter: null,
-                  roundStartTime: null,
-                  currentRound: null,
-                  lastRoundResult: null,
+                await runTransaction(matchRef, (current) => {
+                  if (current === null) return current;
+                  if (current.matchState !== 'GAME_OVER') return; // already transitioned — abort
+                  return {
+                    ...current,
+                    matchState: 'ROOM_SETUP',
+                    winnerId: null,
+                    gameOverReason: null,
+                    player1Score: 0,
+                    player2Score: 0,
+                    player1Letter: null,
+                    player2Letter: null,
+                    player1Pass: null,
+                    player2Pass: null,
+                    player1Role: null,
+                    player2Role: null,
+                    startLetter: null,
+                    endLetter: null,
+                    roundStartTime: null,
+                    currentRound: null,
+                    lastRoundResult: null,
+                  };
                 });
               }
             },
@@ -343,24 +348,29 @@ function App() {
               isPrimary: true,
               onClick: async () => {
                 const matchRef = ref(db, `matches/${currentMatchId}`);
-                await update(matchRef, {
-                  matchState: 'PICKING_LETTERS',
-                  winnerId: null,
-                  gameOverReason: null,
-                  player1Score: 0,
-                  player2Score: 0,
-                  player1Letter: null,
-                  player2Letter: null,
-                  player1Pass: null,
-                  player2Pass: null,
-                  player1Role: 'START',
-                  player2Role: 'END',
-                  startLetter: null,
-                  endLetter: null,
-                  roundStartTime: null,
-                  currentRound: 1,
-                  lastRoundResult: null,
-                  // Rules (minWordLength, winTarget, letterMode) are preserved
+                await runTransaction(matchRef, (current) => {
+                  if (current === null) return current;
+                  if (current.matchState !== 'GAME_OVER') return; // already transitioned — abort
+                  return {
+                    ...current,
+                    matchState: 'PICKING_LETTERS',
+                    winnerId: null,
+                    gameOverReason: null,
+                    player1Score: 0,
+                    player2Score: 0,
+                    player1Letter: null,
+                    player2Letter: null,
+                    player1Pass: null,
+                    player2Pass: null,
+                    player1Role: 'START',
+                    player2Role: 'END',
+                    startLetter: null,
+                    endLetter: null,
+                    roundStartTime: null,
+                    currentRound: 1,
+                    lastRoundResult: null,
+                    // Rules (minWordLength, winTarget, letterMode) are preserved
+                  };
                 });
               }
             }

@@ -84,6 +84,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
   const roomMatchIdRef = useRef(null);   // mirrors pendingMatchId for cancelRoom cleanup
   const roomCodeRef = useRef(null);      // mirrors roomCode for cancelRoom cleanup
   const matchDataRef = useRef(null);     // mirrors matchData to detect prev state in listener
+  const usernameCacheRef = useRef({});   // prevents refetching usernames on every setting change
   const [roomTab, setRoomTab] = useState('room');
   const [statsView, setStatsView] = useState('current');
   const [statTab, setStatTab] = useState('total');
@@ -172,7 +173,11 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
 
   // ── Utility Room Functions ───────────────────────────────────────────────
   const initializeRoomListener = (mId) => {
-    if (roomListenerRef.current) roomListenerRef.current();
+    if (roomListenerRef.current) {
+      roomListenerRef.current();
+      roomListenerRef.current = null;
+    }
+
     const matchRef = ref(db, `matches/${mId}`);
 
     const unsub = onValue(matchRef, async (snap) => {
@@ -187,8 +192,13 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
           roomListenerRef.current = null;
           setShowRoomModal(false);
           setMatchData(null);
+          matchDataRef.current = null;
           setPendingMatchId(null);
           setRoomPlayers([]);
+        } else if (roomMatchIdRef.current === mId && !matchDataRef.current) {
+          // If we are a guest and never got data, we might be stuck.
+          // For now, we just wait. If we wanted a timeout, we'd add it here.
+          console.log('Room listener received null snapshot (initial or pending)');
         }
         return;
       }
@@ -217,28 +227,68 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       if (data.matchState === 'PICKING_LETTERS') {
         unsub();
         roomListenerRef.current = null;
+        // Apply remove() on disconnect for both players during live gameplay.
+        // If either drops, the match is deleted and the other is returned to the lobby.
+        const matchDbRef = ref(db, `matches/${mId}`);
+        onDisconnect(matchDbRef).cancel().then(() => onDisconnect(matchDbRef).remove()).catch(() => {});
         setMatchId(mId, data);
         return;
       }
 
-      // Handle players list
+      // Helper to instantly resolve a known username
+      const getKnownName = (uid) => {
+        if (uid === user.uid) return profile?.username || 'You';
+        return usernameCacheRef.current[uid] || 'Loading...';
+      };
+
+      // Optimistic players update to prevent visual flash
+      const optimisticPlayers = [];
+      optimisticPlayers.push({ 
+        uid: data.player1Id, 
+        username: getKnownName(data.player1Id), 
+        isHost: true,
+        isLoading: getKnownName(data.player1Id) === 'Loading...'
+      });
+      if (data.player2Id) {
+        optimisticPlayers.push({ 
+          uid: data.player2Id, 
+          username: getKnownName(data.player2Id), 
+          isHost: false,
+          isLoading: getKnownName(data.player2Id) === 'Loading...'
+        });
+      }
+      setRoomPlayers(optimisticPlayers);
+
+      // Fetch any missing usernames and build final players list
       const players = [];
-      // P1 (always exists if match exists)
-      let p1Username = 'Host';
-      try {
-        const p1Snap = await getDoc(doc(firestore, 'users', data.player1Id));
-        if (p1Snap.exists()) p1Username = p1Snap.data().username;
-      } catch { }
-      players.push({ uid: data.player1Id, username: p1Username, isHost: true });
+      
+      const fetchUsername = async (uid, defaultName) => {
+        if (uid === user.uid) return profile?.username || defaultName;
+        if (usernameCacheRef.current[uid]) return usernameCacheRef.current[uid];
+        try {
+          const snap = await getDoc(doc(firestore, 'users', uid));
+          if (snap.exists()) {
+            usernameCacheRef.current[uid] = snap.data().username;
+            return snap.data().username;
+          }
+        } catch { }
+        return defaultName;
+      };
+
+      const p1Username = await fetchUsername(data.player1Id, 'Host');
+      players.push({ uid: data.player1Id, username: p1Username, isHost: true, isLoading: false });
 
       if (data.player2Id) {
-        let p2Username = 'Player 2';
-        try {
-          const p2Snap = await getDoc(doc(firestore, 'users', data.player2Id));
-          if (p2Snap.exists()) p2Username = p2Snap.data().username;
-        } catch { }
-        players.push({ uid: data.player2Id, username: p2Username, isHost: false });
+        const p2Username = await fetchUsername(data.player2Id, 'Player 2');
+        players.push({ uid: data.player2Id, username: p2Username, isHost: false, isLoading: false });
       }
+
+      // Abort if the user left the room during the async fetch
+      if (roomMatchIdRef.current !== mId) return;
+      
+      // Abort if a newer snapshot has already fired (prevents stale async overwrites)
+      if (matchDataRef.current !== data) return;
+
       setRoomPlayers(players);
     });
 
@@ -253,7 +303,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
         const publicRef = ref(db, `lobby/waiting_matches/${mode}/${pendingMatchId}`);
         if (val) {
           // Verify we aren't already full before listing publicly
-          if (!matchData.player2Id) {
+          if (!matchData?.player2Id) {
             await set(publicRef, true);
             onDisconnect(publicRef).remove();
           }
@@ -269,7 +319,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
 
   const copyRoomCode = () => {
     if (!matchData?.roomCode) return;
-    navigator.clipboard.writeText(matchData.roomCode).then(() => {
+    navigator.clipboard.writeText(matchData?.roomCode).then(() => {
       setCopiedCode(true);
       setTimeout(() => setCopiedCode(false), 2000);
     });
@@ -280,48 +330,60 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       roomListenerRef.current();
       roomListenerRef.current = null;
     }
-    setShowRoomModal(false);
-    setRoomPlayers([]);
     const mId = roomMatchIdRef.current || pendingMatchId;
     const mCode = roomCodeRef.current || roomCode;
     const isHost = matchData?.player1Id === user.uid;
+    const wasPublic = matchData?.isPublic;
 
+    // Clear everything synchronously to prevent race conditions
+    setShowRoomModal(false);
+    setRoomPlayers([]);
+    setPendingMatchId(null);
+    setRoomCode(null);
+    setMatchData(null);
+    matchDataRef.current = null;
     roomMatchIdRef.current = null;
     roomCodeRef.current = null;
+
     try {
       if (mId) {
         const matchRef = ref(db, `matches/${mId}`);
         const codeRef = ref(db, `room_codes/${mCode}`);
         const publicRef = ref(db, `lobby/waiting_matches/${mode}/${mId}`);
         
-        // Clean up onDisconnect first
-        await onDisconnect(matchRef).cancel().catch(() => {});
-        if (mCode) await onDisconnect(codeRef).cancel().catch(() => {});
-        await onDisconnect(publicRef).cancel().catch(() => {});
+        // Prepare cleanup tasks to run in parallel for lowest latency
+        const cleanupTasks = [
+          onDisconnect(matchRef).cancel().catch(() => {}),
+          onDisconnect(publicRef).cancel().catch(() => {})
+        ];
+        if (mCode) cleanupTasks.push(onDisconnect(codeRef).cancel().catch(() => {}));
 
         if (isHost) {
-          await remove(matchRef);
-          if (mCode) await remove(codeRef).catch(() => {});
-          await remove(publicRef).catch(() => {});
+          cleanupTasks.push(remove(matchRef).catch(() => {}));
+          cleanupTasks.push(remove(publicRef).catch(() => {}));
+          if (mCode) cleanupTasks.push(remove(codeRef).catch(() => {}));
+          await Promise.all(cleanupTasks);
         } else {
-          // Guest leaving: clear self and reset room to WAITING
-          await update(matchRef, {
-            player2Id: null,
-            matchState: 'WAITING'
+          // Guest leaving: execute transaction immediately without waiting for cleanup
+          // to make the departure feel "smooth" and instant for the host.
+          const leaveResult = await runTransaction(matchRef, (current) => {
+            if (current === null) return current;
+            if (current.matchState !== 'ROOM_SETUP') return; // game already started — abort
+            if (current.player2Id !== user.uid) return; // not our slot — abort
+            current.player2Id = null;
+            current.matchState = 'WAITING';
+            return current;
           });
-          // If it's a public room, re-list it
-          if (matchData?.isPublic) {
-            await set(publicRef, true);
+          
+          if (leaveResult.committed && wasPublic) {
+            cleanupTasks.push(set(publicRef, true));
           }
+          await Promise.all(cleanupTasks);
         }
       }
     } catch (err) {
       console.error('Cancel room error:', err);
     }
-    setPendingMatchId(null);
-    setRoomCode(null);
-    setMatchData(null);
-    matchDataRef.current = null;
   };
 
   const startGame = async () => {
@@ -345,9 +407,23 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
         winTarget: roomSettings.winTarget,
         letterMode: letterMode
       };
-      await update(ref(db, `matches/${mId}`), startUpdates);
-      
-      // Clean up room index, public pool, and onDisconnect listeners now that game started
+
+      // Guard against double-start and against guest having just disconnected
+      const result = await runTransaction(ref(db, `matches/${mId}`), (current) => {
+        if (current === null) return current;
+        if (current.matchState !== 'ROOM_SETUP') return; // already started — abort
+        if (!current.player2Id) return; // guest disconnected between button enable and click — abort
+        return { ...current, ...startUpdates };
+      });
+
+      if (!result.committed) return; // game already started or P2 gone — do nothing
+
+      // Ensure the match is destroyed if the host disconnects during gameplay.
+      // The host's handler is already remove() from creation, but we explicitly re-apply
+      // it here just to be safe and clear.
+      onDisconnect(ref(db, `matches/${mId}`)).remove().catch(() => {});
+
+      // Clean up room index, public pool, and their onDisconnect listeners
       if (mCode) {
         onDisconnect(ref(db, `room_codes/${mCode}`)).cancel().catch(() => {});
         await remove(ref(db, `room_codes/${mCode}`)).catch(() => {});
@@ -356,7 +432,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       onDisconnect(publicRef).cancel().catch(() => {});
       await remove(publicRef).catch(() => {});
 
-      setMatchId(mId, { ...matchData, ...startUpdates });
+      setMatchId(mId, result.snapshot.val());
     } catch (err) {
       console.error('Start game error:', err);
     }
@@ -367,6 +443,9 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
     if (!code) return;
     setJoining(true);
     setJoinError(null);
+    setMatchData(null);
+    matchDataRef.current = null;
+    setRoomPlayers([]);
     try {
       const codeSnap = await get(ref(db, `room_codes/${code}`));
       if (!codeSnap.exists()) {
@@ -424,6 +503,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
         matchState: 'WAITING'
       });
       
+      setMatchData(matchInfo);
       initializeRoomListener(matchId);
       setShowRoomModal(true);
     } catch (err) {
@@ -436,6 +516,9 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
 
   const findMatch = async () => {
     setStatus('searching');
+    setMatchData(null);
+    matchDataRef.current = null;
+    setRoomPlayers([]);
     try {
       // 1. First, look for an existing public room
       const publicWaitingRef = ref(db, `lobby/waiting_matches/${mode}`);
@@ -466,7 +549,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
             return;
           });
 
-          if (result.committed) {
+          if (result.committed && result.snapshot.exists()) {
             // Successfully joined an existing room!
             await remove(ref(db, `lobby/waiting_matches/${mode}/${mId}`)).catch(() => { });
             setPendingMatchId(mId);
@@ -478,6 +561,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
               matchState: 'WAITING'
             });
             
+            setMatchData(result.snapshot.val());
             initializeRoomListener(mId);
             setRoomTab('room');
             setShowRoomModal(true);
@@ -502,7 +586,9 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
   const createRoom = async (isPublic = false) => {
     const code = generateRoomCode();
     const matchId = `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    // Set refs synchronously before any await so cancelRoom always has them
+    // Clear stale state and set refs synchronously before any await
+    setMatchData(null);
+    matchDataRef.current = null;
     roomMatchIdRef.current = matchId;
     roomCodeRef.current = code;
     setRoomCode(code);
@@ -524,7 +610,6 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
     };
 
     setMatchData(initialData);
-    matchDataRef.current = initialData;
     setShowRoomModal(true);
     try {
       const matchRef = ref(db, `matches/${matchId}`);
@@ -537,6 +622,15 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       if (isPublic) {
         await set(publicRef, true);
         onDisconnect(publicRef).remove();
+      }
+
+      // Check if user clicked cancel during the await
+      if (roomMatchIdRef.current !== matchId) {
+        // They cancelled! Make sure the room is deleted since cancelRoom might have missed it
+        await remove(matchRef);
+        if (isPublic) await remove(publicRef);
+        await remove(codeRef);
+        return;
       }
 
       onDisconnect(matchRef).remove();
@@ -1028,20 +1122,8 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       {showLinkModal && <LinkAccount onClose={() => setShowLinkModal(false)} username={profile?.username} />}
 
 
-      {showRoomModal && createPortal(
+      {showRoomModal && matchData && createPortal(
         <div className="popup-overlay">
-          {!matchData ? (
-            <div className="rules-modal" style={{ textAlign: 'center', padding: '3rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1.5rem' }}>
-                <span className="spinner" style={{ width: '2.5rem', height: '2.5rem' }} />
-              </div>
-              <h2 style={{ color: 'var(--glow-color)', marginBottom: '0.5rem' }}>Entering Room...</h2>
-              <p style={{ color: 'var(--text-muted)' }}>Fetching match details</p>
-              <button className="secondary" style={{ marginTop: '2rem', width: '100%' }} onClick={cancelRoom}>
-                Cancel
-              </button>
-            </div>
-          ) : (
             <div className="rules-modal" onClick={e => e.stopPropagation()}>
               <h2 style={{ color: 'var(--glow-color)', marginBottom: '1.25rem', marginTop: 0, fontSize: '1.75rem', textAlign: 'center', flexShrink: 0 }}>
                 Game Room
@@ -1049,8 +1131,8 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
 
               <div className="tags-row" style={{ marginBottom: '1.25rem', flexShrink: 0 }}>
                 <span className="badge-tag badge-versus">Versus Mode</span>
-                <span className={`badge-tag ${matchData.isPublic ? 'badge-public' : 'badge-private'}`}>
-                  {matchData.isPublic ? 'Public' : 'Private'}
+                <span className={`badge-tag ${matchData?.isPublic ? 'badge-public' : 'badge-private'}`}>
+                  {matchData?.isPublic ? 'Public' : 'Private'}
                 </span>
               </div>
 
@@ -1074,8 +1156,8 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
                 {/* Room tab */}
                 {roomTab === 'room' && (() => {
                   const gamesWonByUid = {
-                    [matchData.player1Id]: matchData.player1GamesWon || 0,
-                    ...(matchData.player2Id ? { [matchData.player2Id]: matchData.player2GamesWon || 0 } : {}),
+                    [matchData?.player1Id]: matchData?.player1GamesWon || 0,
+                    ...(matchData?.player2Id ? { [matchData?.player2Id]: matchData?.player2GamesWon || 0 } : {}),
                   };
                   const totalGamesWon = Object.values(gamesWonByUid).reduce((s, v) => s + v, 0);
                   return (
@@ -1086,15 +1168,27 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
                         <span style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--glow-color)' }}>{roomPlayers.length}/2</span>
                       </div>
                       <div className="room-player-slot filled">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                        <span className="room-player-name">{roomPlayers[0]?.username || 'Host'}</span>
+                        {roomPlayers[0]?.isLoading ? (
+                          <span className="spinner" style={{ width: '1.2rem', height: '1.2rem', opacity: 0.5, flexShrink: 0 }} />
+                        ) : (
+                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                        )}
+                        <span className="room-player-name" style={{ color: roomPlayers[0]?.isLoading ? 'var(--text-muted)' : 'inherit', fontStyle: roomPlayers[0]?.isLoading ? 'italic' : 'normal' }}>
+                          {roomPlayers[0]?.username || 'Host'}
+                        </span>
                         <span className="room-player-badge">Host</span>
                       </div>
                       <div className={`room-player-slot ${roomPlayers[1] ? 'filled' : 'waiting'}`}>
                         {roomPlayers[1] ? (
                           <>
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                            <span className="room-player-name">{roomPlayers[1].username}</span>
+                            {roomPlayers[1].isLoading ? (
+                              <span className="spinner" style={{ width: '1.2rem', height: '1.2rem', opacity: 0.5, flexShrink: 0 }} />
+                            ) : (
+                              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                            )}
+                            <span className="room-player-name" style={{ color: roomPlayers[1].isLoading ? 'var(--text-muted)' : 'inherit', fontStyle: roomPlayers[1].isLoading ? 'italic' : 'normal' }}>
+                              {roomPlayers[1].username}
+                            </span>
                           </>
                         ) : (
                           <>
@@ -1107,13 +1201,13 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
                       {/* Stats card — tap anywhere to switch session ↔ all-time */}
                       {roomPlayers.length === 2 && (() => {
                         const currentGame = {
-                          p1: matchData.player1Score || 0,
-                          p2: matchData.player2Score || 0,
-                          w1: matchData.player1GamesWon || 0,
-                          w2: matchData.player2GamesWon || 0
+                          p1: matchData?.player1Score || 0,
+                          p2: matchData?.player2Score || 0,
+                          w1: matchData?.player1GamesWon || 0,
+                          w2: matchData?.player2GamesWon || 0
                         };
                         const allTime = pairStats ? (() => {
-                          const p1IsFirst = pairStats.player1Id === matchData.player1Id;
+                          const p1IsFirst = pairStats.player1Id === matchData?.player1Id;
                           return {
                             p1: p1IsFirst ? (pairStats.player1GamesWon || 0) : (pairStats.player2GamesWon || 0),
                             p2: p1IsFirst ? (pairStats.player2GamesWon || 0) : (pairStats.player1GamesWon || 0),
@@ -1176,18 +1270,18 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
                       <label className="settings-label">Room Visibility</label>
                       <div className="game-tabs" style={{ marginBottom: 0 }}>
                         <button
-                          className={`game-tab${matchData.isPublic ? '' : ' game-tab-active'}`}
+                          className={`game-tab${matchData?.isPublic ? '' : ' game-tab-active'}`}
                           onClick={() => updateRoomSetting('isPublic', false)}
-                          disabled={user.uid !== matchData.player1Id}
+                          disabled={user.uid !== matchData?.player1Id}
                         >Private</button>
                         <button
-                          className={`game-tab${matchData.isPublic ? ' game-tab-active' : ''}`}
+                          className={`game-tab${matchData?.isPublic ? ' game-tab-active' : ''}`}
                           onClick={() => updateRoomSetting('isPublic', true)}
-                          disabled={user.uid !== matchData.player1Id}
+                          disabled={user.uid !== matchData?.player1Id}
                         >Public</button>
                       </div>
                       <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.5rem', textAlign: 'center' }}>
-                        {matchData.isPublic
+                        {matchData?.isPublic
                           ? 'Anyone can join.'
                           : 'Only people with the room code can join.'}
                       </p>
@@ -1200,7 +1294,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
                         onClick={copyRoomCode}
                         style={{ padding: '0.75rem', marginBottom: 0 }}
                       >
-                        <div className="code" style={{ fontSize: '1.75rem' }}>{matchData.roomCode}</div>
+                        <div className="code" style={{ fontSize: '1.75rem' }}>{matchData?.roomCode}</div>
                         <div className={`room-code-hint${copiedCode ? ' copied' : ''}`}>
                           {copiedCode ? '✓ Copied!' : 'Tap to copy'}
                         </div>
@@ -1220,14 +1314,14 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
                       <label className="settings-label">Letter Selection</label>
                       <div className="game-tabs" style={{ marginBottom: 0 }}>
                         <button
-                          className={`game-tab${matchData.letterMode === 'system' ? ' game-tab-active' : ''}`}
+                          className={`game-tab${matchData?.letterMode === 'system' ? ' game-tab-active' : ''}`}
                           onClick={() => updateRoomSetting('letterMode', 'system')}
-                          disabled={user.uid !== matchData.player1Id}
+                          disabled={user.uid !== matchData?.player1Id}
                         >System</button>
                         <button
-                          className={`game-tab${matchData.letterMode === 'players' ? ' game-tab-active' : ''}`}
+                          className={`game-tab${matchData?.letterMode === 'players' ? ' game-tab-active' : ''}`}
                           onClick={() => updateRoomSetting('letterMode', 'players')}
-                          disabled={user.uid !== matchData.player1Id}
+                          disabled={user.uid !== matchData?.player1Id}
                         >Players</button>
                       </div>
                     </div>
@@ -1245,7 +1339,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
                           minWidth: '40px',
                           textAlign: 'center'
                         }}>
-                          {matchData.minWordLength || 3}
+                          {matchData?.minWordLength || 3}
                         </div>
                       </div>
                       <div style={{ position: 'relative', padding: '0.25rem 0' }}>
@@ -1254,16 +1348,16 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
                           className="custom-range"
                           min="3"
                           max="10"
-                          value={matchData.minWordLength || 3}
+                          value={matchData?.minWordLength || 3}
                           onChange={(e) => updateRoomSetting('minWordLength', parseInt(e.target.value))}
-                          disabled={user.uid !== matchData.player1Id}
+                          disabled={user.uid !== matchData?.player1Id}
                           style={{
                             width: '100%',
                             height: '16px',
-                            background: `linear-gradient(to right, var(--glow-color) ${((matchData.minWordLength || 3) - 3) / 7 * 100}%, rgba(255,255,255,0.15) ${((matchData.minWordLength || 3) - 3) / 7 * 100}%)`,
+                            background: `linear-gradient(to right, var(--glow-color) ${((matchData?.minWordLength || 3) - 3) / 7 * 100}%, rgba(255,255,255,0.15) ${((matchData?.minWordLength || 3) - 3) / 7 * 100}%)`,
                             borderRadius: '8px',
                             accentColor: 'transparent',
-                            cursor: user.uid !== matchData.player1Id ? 'not-allowed' : 'pointer',
+                            cursor: user.uid !== matchData?.player1Id ? 'not-allowed' : 'pointer',
                             appearance: 'none',
                             WebkitAppearance: 'none'
                           }}
@@ -1281,9 +1375,9 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
                         {[1, 3, 5, 10, 20].map(n => (
                           <button
                             key={n}
-                            className={`game-tab${(matchData.winTarget || 5) === n ? ' game-tab-active' : ''}`}
+                            className={`game-tab${(matchData?.winTarget || 5) === n ? ' game-tab-active' : ''}`}
                             onClick={() => updateRoomSetting('winTarget', n)}
-                            disabled={user.uid !== matchData.player1Id}
+                            disabled={user.uid !== matchData?.player1Id}
                           >{n}</button>
                         ))}
                       </div>
@@ -1296,7 +1390,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
                 <button className="secondary btn-responsive" onClick={cancelRoom}>
                   Leave Room
                 </button>
-                {user.uid === matchData.player1Id ? (
+                {user.uid === matchData?.player1Id ? (
                   <button
                     className="primary btn-responsive"
                     onClick={startGame}
@@ -1323,7 +1417,6 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
                 )}
               </div>
             </div>
-          )}
         </div>,
         document.body
       )}
