@@ -1,5 +1,6 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import Modal, { ModalActions, ModalBody, ModalFooter, ModalTitle } from './Modal';
 import { ref, get, set, update, onDisconnect, onValue, runTransaction, remove } from 'firebase/database';
 import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
 import { db, firestore } from '../firebase';
@@ -25,6 +26,13 @@ const RULES = {
   versus: 'VISUAL',
   party: 'Coming Soon',
 };
+
+const DEFAULT_ROOM_SETTINGS = {
+  minWordLength: 3,
+  winTarget: 5,
+};
+
+const getDefaultLetterMode = (mode) => (mode === 'party' ? 'system' : 'players');
 
 const StatBlock = ({ label, value, color, glowColor, isWord = false }) => {
   const getDynamicFontSize = (text) => {
@@ -68,38 +76,33 @@ const StatBlock = ({ label, value, color, glowColor, isWord = false }) => {
 
 export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoomInitialized, wordBankKey = 0 }) {
   const [mode, setMode] = useState('versus');
-  const [letterMode, setLetterMode] = useState('players'); // 'system' | 'players'
+  const [letterMode, setLetterMode] = useState(getDefaultLetterMode('versus')); // 'system' | 'players'
   const [status, setStatus] = useState('idle');           // idle | searching | error
   const [pendingMatchId, setPendingMatchId] = useState(null);
   const [roomCode, setRoomCode] = useState(null);
-  const [showJoinModal, setShowJoinModal] = useState(false);
-  const [joinCodeInput, setJoinCodeInput] = useState('');
-  const [joinError, setJoinError] = useState(null);
-  const [joining, setJoining] = useState(false);
-  const [showRoomModal, setShowRoomModal] = useState(false);
-  const [roomPlayers, setRoomPlayers] = useState([]);
-  const [matchData, setMatchData] = useState(null); // Local mirror for room setup sync
-  const [roomSettings, setRoomSettings] = useState({ minWordLength: 3, winTarget: 5 });
-  const roomListenerRef = useRef(null);
-  const roomMatchIdRef = useRef(null);   // mirrors pendingMatchId for cancelRoom cleanup
-  const roomCodeRef = useRef(null);      // mirrors roomCode for cancelRoom cleanup
-  const matchDataRef = useRef(null);     // mirrors matchData to detect prev state in listener
-  const usernameCacheRef = useRef({});   // prevents refetching usernames on every setting change
-  const seekingSlotRef = useRef(null);   // tracks the Quick Match slot so cancelRoom can clean it up
-  const [roomTab, setRoomTab] = useState('room');
-  const [statsView, setStatsView] = useState('current');
-  const [statTab, setStatTab] = useState('total');
-  const [copiedCode, setCopiedCode] = useState(false);
-  const [showRules, setShowRules] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [showStats, setShowStats] = useState(false);
-  const [showWordBank, setShowWordBank] = useState(false);
-  const [showLinkModal, setShowLinkModal] = useState(false);
+  const [activePopup, setActivePopup] = useState(null); // 'stats' | 'wordbank' | 'settings' | 'rules' | 'room' | 'join' | 'link'
   const [tutorialMode, setTutorialMode] = useState('versus');
   const [pairStats, setPairStats] = useState(null);
   const pairStatsUnsubRef = useRef(null);
   const [wordBank, setWordBank] = useState(null);
   const [wordBankLoading, setWordBankLoading] = useState(false);
+  const [matchData, setMatchData] = useState(null);
+  const [roomPlayers, setRoomPlayers] = useState([]);
+  const [roomSettings, setRoomSettings] = useState(DEFAULT_ROOM_SETTINGS);
+  const [roomTab, setRoomTab] = useState('room');
+  const [copiedCode, setCopiedCode] = useState(false);
+  const [joining, setJoining] = useState(false);
+  const [joinCodeInput, setJoinCodeInput] = useState('');
+  const [joinError, setJoinError] = useState(null);
+  const [statsView, setStatsView] = useState('current');
+  const [statTab, setStatTab] = useState('total');
+
+  const roomMatchIdRef = useRef(null);
+  const roomCodeRef = useRef(null);
+  const matchDataRef = useRef(null);
+  const roomListenerRef = useRef(null);
+  const seekingSlotRef = useRef(null);
+  const usernameCacheRef = useRef({});
 
   // ── Fetch cross-session pair stats when both players are in the room ─────
   useEffect(() => {
@@ -141,7 +144,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
 
   // Fetch Word Bank on-demand
   useEffect(() => {
-    if (showWordBank && !wordBank && user?.uid) {
+    if (activePopup === 'wordbank' && !wordBank && user?.uid) {
       const fetchWords = async () => {
         setWordBankLoading(true);
         try {
@@ -159,7 +162,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       };
       fetchWords();
     }
-  }, [showWordBank, wordBank, user?.uid]);
+  }, [activePopup === 'wordbank', wordBank, user?.uid]);
 
   // Invalidate word bank cache whenever the player returns from a game
   // so the next Word Bank open always shows fresh data.
@@ -197,20 +200,15 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       const data = snap.val();
 
       if (!data) {
-        // Only treat null as a deletion if we've already had data for this room.
-        // This prevents the modal from "flashing" or closing immediately on the
-        // very first snapshot if the cloud write hasn't propagated yet.
         if (roomMatchIdRef.current === mId && matchDataRef.current) {
           unsub();
           roomListenerRef.current = null;
-          setShowRoomModal(false);
+          setActivePopup(null);
           setMatchData(null);
           matchDataRef.current = null;
           setPendingMatchId(null);
           setRoomPlayers([]);
         } else if (roomMatchIdRef.current === mId && !matchDataRef.current) {
-          // If we are a guest and never got data, we might be stuck.
-          // For now, we just wait. If we wanted a timeout, we'd add it here.
           console.log('Room listener received null snapshot (initial or pending)');
         }
         return;
@@ -219,25 +217,22 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       setMatchData(data);
       matchDataRef.current = data;
       setRoomSettings({
-        minWordLength: data.minWordLength || 3,
-        winTarget: data.winTarget || 5
+        minWordLength: data.minWordLength || DEFAULT_ROOM_SETTINGS.minWordLength,
+        winTarget: data.winTarget || DEFAULT_ROOM_SETTINGS.winTarget
       });
       if (data.letterMode) setLetterMode(data.letterMode);
 
       if (data.matchState === 'ROOM_SETUP' || (data.matchState === 'WAITING' && data.player1Id === user.uid)) {
-        setShowRoomModal(true);
+        setActivePopup('room');
         setPendingMatchId(mId);
 
-        // Unified Approach: If the room is public and waiting for a guest,
-        // try to occupy the 'seeking' slot so newcomers find us immediately.
         if (data.matchState === 'WAITING' && data.isPublic && data.player1Id === user.uid) {
           const slotRef = ref(db, `lobby/seeking/${data.mode || 'versus'}`);
           runTransaction(slotRef, (current) => {
-            // Only occupy if slot is empty or we already hold it
             if (!current || current.status === 'matched' || current.matchId === mId) {
               return { matchId: mId, hostId: user.uid, status: 'waiting' };
             }
-            return; // Someone else is already featured
+            return; 
           }).then((res) => {
             if (res.committed) {
               seekingSlotRef.current = slotRef;
@@ -245,32 +240,26 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
             }
           });
 
-          // Also keep the legacy index for backup/compatibility
           const publicRef = ref(db, `lobby/waiting_matches/${data.mode || 'versus'}/${mId}`);
           set(publicRef, true).catch(() => {});
           onDisconnect(publicRef).remove();
         }
       }
 
-      // Transition to game — hand off matchId + data so App.jsx renders immediately
       if (data.matchState === 'PICKING_LETTERS') {
         unsub();
         roomListenerRef.current = null;
-        // Apply remove() on disconnect for both players during live gameplay.
-        // If either drops, the match is deleted and the other is returned to the lobby.
         const matchDbRef = ref(db, `matches/${mId}`);
         onDisconnect(matchDbRef).cancel().then(() => onDisconnect(matchDbRef).remove()).catch(() => {});
         setMatchId(mId, data);
         return;
       }
 
-      // Helper to instantly resolve a known username
       const getKnownName = (uid) => {
         if (uid === user.uid) return profile?.username || 'You';
         return usernameCacheRef.current[uid] || 'Loading...';
       };
 
-      // Optimistic players update to prevent visual flash
       const optimisticPlayers = [];
       optimisticPlayers.push({ 
         uid: data.player1Id, 
@@ -288,9 +277,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       }
       setRoomPlayers(optimisticPlayers);
 
-      // Fetch any missing usernames and build final players list
       const players = [];
-      
       const fetchUsername = async (uid, defaultName) => {
         if (uid === user.uid) return profile?.username || defaultName;
         if (usernameCacheRef.current[uid]) return usernameCacheRef.current[uid];
@@ -312,10 +299,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
         players.push({ uid: data.player2Id, username: p2Username, isHost: false, isLoading: (p2Username === '...') });
       }
 
-      // Abort if the user left the room during the async fetch
       if (roomMatchIdRef.current !== mId) return;
-      
-      // Abort if a newer snapshot has already fired (prevents stale async overwrites)
       if (matchDataRef.current !== data) return;
 
       setRoomPlayers(players);
@@ -331,7 +315,6 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       if (key === 'isPublic') {
         const publicRef = ref(db, `lobby/waiting_matches/${mode}/${pendingMatchId}`);
         if (val) {
-          // Verify we aren't already full before listing publicly
           if (!matchData?.player2Id) {
             await set(publicRef, true);
             onDisconnect(publicRef).remove();
@@ -364,8 +347,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
     const isHost = matchData?.player1Id === user.uid;
     const wasPublic = matchData?.isPublic;
 
-    // Clear everything synchronously to prevent race conditions
-    setShowRoomModal(false);
+    setActivePopup(null);
     setRoomPlayers([]);
     setPendingMatchId(null);
     setRoomCode(null);
@@ -374,7 +356,6 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
     roomMatchIdRef.current = null;
     roomCodeRef.current = null;
 
-    // Clean up the Quick Match seeking slot if we registered one as host
     if (seekingSlotRef.current) {
       const slotRef = seekingSlotRef.current;
       seekingSlotRef.current = null;
@@ -388,7 +369,6 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
         const codeRef = ref(db, `room_codes/${mCode}`);
         const publicRef = ref(db, `lobby/waiting_matches/${mode}/${mId}`);
         
-        // Prepare cleanup tasks to run in parallel for lowest latency
         const cleanupTasks = [
           onDisconnect(matchRef).cancel().catch(() => {}),
           onDisconnect(publicRef).cancel().catch(() => {})
@@ -401,21 +381,16 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
           if (mCode) cleanupTasks.push(remove(codeRef).catch(() => {}));
           await Promise.all(cleanupTasks);
         } else {
-          // Guest leaving: try to cleanly exit ROOM_SETUP state first.
           const leaveResult = await runTransaction(matchRef, (current) => {
             if (current === null) return current;
-            if (current.matchState !== 'ROOM_SETUP') return; // game already started — abort
-            if (current.player2Id !== user.uid) return; // not our slot — abort
+            if (current.matchState !== 'ROOM_SETUP') return;
+            if (current.player2Id !== user.uid) return;
             current.player2Id = null;
             current.matchState = 'WAITING';
             return current;
           });
 
           if (!leaveResult.committed) {
-            // Transaction aborted — the host started the game just before we left.
-            // Forcibly remove ourselves from the active match. This triggers the
-            // App.jsx dropout guard (!data.player2Id during active game), which
-            // will delete the match and send the host back to the lobby too.
             await update(matchRef, { player2Id: null }).catch(() => {});
           } else if (wasPublic) {
             cleanupTasks.push(set(publicRef, true));
@@ -444,26 +419,18 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
         letterMode: letterMode
       };
 
-      // Guard against double-start and against guest having just disconnected.
-      // IMPORTANT: Do NOT unsubscribe the room listener before this transaction.
-      // If the transaction aborts (P2 left), we need the listener to still be active
-      // so the host sees the WAITING state and the UI recovers gracefully.
       const result = await runTransaction(ref(db, `matches/${mId}`), (current) => {
         if (current === null) return current;
-        if (current.matchState !== 'ROOM_SETUP') return; // already started — abort
-        if (!current.player2Id) return; // guest disconnected — abort
+        if (current.matchState !== 'ROOM_SETUP') return;
+        if (!current.player2Id) return;
         return { ...current, ...startUpdates };
       });
 
       if (!result.committed) {
-        // P2 left just as we clicked Start. Re-attach the room listener so the
-        // host sees the WAITING state and is NOT stuck in a broken game view.
         initializeRoomListener(mId);
         return;
       }
 
-      // Transaction committed — game is starting. NOW it is safe to unsubscribe
-      // the room listener and hand control to the App.jsx game listener.
       if (roomListenerRef.current) {
         roomListenerRef.current();
         roomListenerRef.current = null;
@@ -471,10 +438,8 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       roomMatchIdRef.current = null;
       roomCodeRef.current = null;
 
-      // Ensure the match is destroyed if the host disconnects during gameplay.
       onDisconnect(ref(db, `matches/${mId}`)).remove().catch(() => {});
 
-      // Clean up room index, public pool, and their onDisconnect listeners
       if (mCode) {
         onDisconnect(ref(db, `room_codes/${mCode}`)).cancel().catch(() => {});
         await remove(ref(db, `room_codes/${mCode}`)).catch(() => {});
@@ -483,8 +448,6 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       onDisconnect(publicRef).cancel().catch(() => {});
       await remove(publicRef).catch(() => {});
 
-      // Clear the seeking slot if this was a Quick Match game (guest already removed it,
-      // but clean up ours just in case the guest joined via code instead)
       if (seekingSlotRef.current) {
         onDisconnect(seekingSlotRef.current).cancel().catch(() => {});
         remove(seekingSlotRef.current).catch(() => {});
@@ -502,9 +465,6 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
     if (!code) return;
     setJoining(true);
     setJoinError(null);
-    setMatchData(null);
-    matchDataRef.current = null;
-    setRoomPlayers([]);
     try {
       const codeSnap = await get(ref(db, `room_codes/${code}`));
       if (!codeSnap.exists()) {
@@ -514,13 +474,9 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       const matchId = codeSnap.val();
       const matchRef = ref(db, `matches/${matchId}`);
 
-      // Pre-fetch the match data to pop the local cache and prevent
-      // transaction aborts due to initial null state.
       await get(matchRef);
 
       const result = await runTransaction(matchRef, (current) => {
-        // If the transaction starts with null, return null to tell Firebase
-        // to continue the transaction until it has the server data.
         if (current === null) return current;
 
         if (current.matchState === 'WAITING' && !current.player2Id) {
@@ -532,7 +488,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
           current.player2GamesWon = 0;
           return current;
         }
-        return; // Abort transaction if conditions not met
+        return;
       });
 
       if (!result.committed) {
@@ -546,17 +502,14 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
         return;
       }
 
-      // If it was public, remove it from registry
       if (matchInfo.isPublic) {
         await remove(ref(db, `lobby/waiting_matches/${matchInfo.mode || 'versus'}/${matchId}`)).catch(() => { });
       }
 
-      setShowJoinModal(false);
       setJoinCodeInput('');
       setPendingMatchId(matchId);
       roomMatchIdRef.current = matchId;
       
-      // Guest onDisconnect: clear self and reset state if connection lost
       onDisconnect(matchRef).update({
         player2Id: null,
         matchState: 'WAITING'
@@ -564,7 +517,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       
       setMatchData(matchInfo);
       initializeRoomListener(matchId);
-      setShowRoomModal(true);
+      setActivePopup('room');
     } catch (err) {
       console.error('Join room error:', err);
       setJoinError('Connection failed. Please try again.');
@@ -576,7 +529,6 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
   const findMatch = async () => {
     setStatus('searching');
     try {
-      // Create our own room silently first.
       await createRoom(true, { silent: true });
       const myMatchId = roomMatchIdRef.current;
       const myCode = roomCodeRef.current;
@@ -584,31 +536,26 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       const slotRef = ref(db, `lobby/seeking/${mode}`);
       onDisconnect(slotRef).remove();
 
-      // The single point of truth: check the 'seeking' slot via transaction.
       const slotResult = await runTransaction(slotRef, (current) => {
         if (!current || current.status === 'matched') {
-          // Slot is free — register as the waiting host
           return { matchId: myMatchId, hostId: user.uid, status: 'waiting' };
         }
         if (current.hostId === user.uid) return current;
-        // Another player is waiting — mark as matched so we know their matchId
         return { ...current, status: 'matched', guestId: user.uid };
       });
 
       const slotVal = slotResult.snapshot.val();
 
       if (!slotVal || slotVal.matchId === myMatchId) {
-        // We registered as host
         seekingSlotRef.current = slotRef;
         setRoomPlayers([{ uid: user.uid, username: profile?.username || 'You', isHost: true }]);
         initializeRoomListener(myMatchId);
         setRoomTab('room');
-        setShowRoomModal(true);
+        setActivePopup('room');
         setStatus('idle');
         return;
       }
 
-      // We're the guest — join the featured host's room
       const hostMatchId = slotVal.matchId;
       const hostMatchRef = ref(db, `matches/${hostMatchId}`);
       
@@ -619,13 +566,12 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       }
 
       if (!hostSnap.exists()) {
-        // Fallback to host
         seekingSlotRef.current = slotRef;
         await set(slotRef, { matchId: myMatchId, hostId: user.uid, status: 'waiting' });
         setRoomPlayers([{ uid: user.uid, username: profile?.username || 'You', isHost: true }]);
         initializeRoomListener(myMatchId);
         setRoomTab('room');
-        setShowRoomModal(true);
+        setActivePopup('room');
         setStatus('idle');
         return;
       }
@@ -643,7 +589,6 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       });
 
       if (joinResult.committed && joinResult.snapshot.exists()) {
-        // Clean up our own unused room
         const myMatchRef = ref(db, `matches/${myMatchId}`);
         const myPublicRef = ref(db, `lobby/waiting_matches/${mode}/${myMatchId}`);
         onDisconnect(myMatchRef).cancel().catch(() => {});
@@ -654,7 +599,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
           remove(myMatchRef).catch(() => {}),
           remove(myPublicRef).catch(() => {}),
           myCode ? remove(ref(db, `room_codes/${myCode}`)).catch(() => {}) : Promise.resolve(),
-          remove(slotRef).catch(() => {}) // Clear the slot now that the match is made
+          remove(slotRef).catch(() => {})
         ]);
 
         roomMatchIdRef.current = hostMatchId;
@@ -665,18 +610,17 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
 
         initializeRoomListener(hostMatchId);
         setRoomTab('room');
-        setShowRoomModal(true);
+        setActivePopup('room');
         setStatus('idle');
         return;
       }
 
-      // Final fallback: if join failed, become a host yourself
       seekingSlotRef.current = slotRef;
       await set(slotRef, { matchId: myMatchId, hostId: user.uid, status: 'waiting' });
       setRoomPlayers([{ uid: user.uid, username: profile?.username || 'You', isHost: true }]);
       initializeRoomListener(myMatchId);
       setRoomTab('room');
-      setShowRoomModal(true);
+      setActivePopup('room');
       setStatus('idle');
     } catch (err) {
       console.error('Find match error:', err);
@@ -685,16 +629,17 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
     }
   };
 
-
-  // ── Versus: create private room ───────────────────────────────────────────
-  // silent=true: used by findMatch so the modal only opens once the role is confirmed.
   const createRoom = async (isPublic = false, { silent = false } = {}) => {
     const code = generateRoomCode();
     const matchId = `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const defaultLetterMode = getDefaultLetterMode(mode);
+    const initialSettings = { ...DEFAULT_ROOM_SETTINGS };
     roomMatchIdRef.current = matchId;
     roomCodeRef.current = code;
     setRoomCode(code);
     setRoomTab('room');
+    setRoomSettings(initialSettings);
+    setLetterMode(defaultLetterMode);
 
     const initialData = {
       matchId: matchId,
@@ -705,19 +650,17 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       player1GamesWon: 0,
       player2GamesWon: 0,
       roomCode: code,
-      minWordLength: roomSettings.minWordLength,
-      winTarget: roomSettings.winTarget,
-      letterMode: letterMode
+      minWordLength: initialSettings.minWordLength,
+      winTarget: initialSettings.winTarget,
+      letterMode: defaultLetterMode
     };
 
     setMatchData(initialData);
     matchDataRef.current = initialData;
 
-    // In silent mode (Quick Match), don't open the modal yet. findMatch will do
-    // it once after the role (host or guest) is fully confirmed — no flash.
     if (!silent) {
       setRoomPlayers([{ uid: user.uid, username: profile?.username || 'You', isHost: true }]);
-      setShowRoomModal(true);
+      setActivePopup('room');
     }
 
     try {
@@ -733,7 +676,6 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
         onDisconnect(publicRef).remove();
       }
 
-      // Check if user clicked cancel during the await
       if (roomMatchIdRef.current !== matchId) {
         await remove(matchRef);
         if (isPublic) await remove(publicRef);
@@ -750,7 +692,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       }
     } catch (err) {
       console.error('Create room error:', err);
-      setShowRoomModal(false);
+      setActivePopup(null);
       setRoomPlayers([]);
       setRoomCode(null);
       roomMatchIdRef.current = null;
@@ -760,9 +702,6 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
     }
   };
 
-
-
-  // ── Action panel per mode ─────────────────────────────────────────────────
   const renderActionPanel = () => {
     if (mode === 'solo') {
       return (
@@ -818,8 +757,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
       );
     }
 
-    // Versus (default)
-    const anyModalOpen = showRoomModal || showJoinModal;
+    const anyModalOpen = activePopup !== null;
     return (
       <div className="action-panel">
         {status === 'error' && (
@@ -843,7 +781,7 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
           <button className="action-panel-btn-sub" onClick={() => createRoom(false)} disabled={anyModalOpen}>
             Create Room
           </button>
-          <button className="action-panel-btn-sub" onClick={() => setShowJoinModal(true)} disabled={anyModalOpen}>
+          <button className="action-panel-btn-sub" onClick={() => setActivePopup('join')} disabled={anyModalOpen}>
             Join by Code
           </button>
         </div>
@@ -861,10 +799,10 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
           width: 22px;
           height: 22px;
           background: #fff;
-          border: 3px solid var(--glow-color);
+          border: 1px solid rgba(255, 255, 255, 0.22);
           border-radius: 50%;
           cursor: pointer;
-          box-shadow: 0 0 10px rgba(0,0,0,0.5);
+          box-shadow: none;
           position: relative;
           z-index: 10;
         }
@@ -872,692 +810,669 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
           width: 22px;
           height: 22px;
           background: #fff;
-          border: 3px solid var(--glow-color);
+          border: 1px solid rgba(255, 255, 255, 0.22);
           border-radius: 50%;
           cursor: pointer;
-          box-shadow: 0 0 10px rgba(0,0,0,0.5);
+          box-shadow: none;
           position: relative;
           z-index: 10;
         }
+        .custom-range:focus,
+        .custom-range:focus-visible {
+          outline: none;
+          box-shadow: none;
+        }
+        .custom-range:focus::-webkit-slider-thumb,
+        .custom-range:focus-visible::-webkit-slider-thumb,
+        .custom-range:focus::-moz-range-thumb,
+        .custom-range:focus-visible::-moz-range-thumb {
+          box-shadow: none;
+        }
       `}</style>
-      {showStats && createPortal(
-        <div className="popup-overlay" onClick={() => setShowStats(false)}>
-          <div className="rules-modal" onClick={e => e.stopPropagation()}>
-            <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', color: 'var(--glow-color)', marginBottom: '2rem', marginTop: 0 }}>
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
-              Your Stats
-            </h2>
+      {/* ── Popups ───── */}
 
-            <div className="modal-body">
-              <div className="mode-tabs" style={{ marginBottom: '1.5rem' }}>
-                {[
-                  { id: 'total', label: 'Total', icon: '🌍' },
-                  { id: 'solo', label: 'Solo', icon: '👤' },
-                  { id: 'versus', label: 'Versus', icon: '⚔️' },
-                  { id: 'party', label: 'Party', icon: '👥' }
-                ].map(tab => (
-                  <button
-                    key={tab.id}
-                    className={`mode-tab ${statTab === tab.id ? 'tab-active' : ''}`}
-                    onClick={() => setStatTab(tab.id)}
-                    style={{ fontSize: '0.82rem', padding: '0.6rem 0.2rem' }}
-                  >
-                    {tab.icon} {tab.label}
-                  </button>
-                ))}
-              </div>
+      {activePopup === 'stats' && (
+        <Modal onClose={() => setActivePopup(null)}>
+          <ModalTitle icon={<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>}>
+            Your Stats
+          </ModalTitle>
 
-              {(() => {
-                const activeStats = profile?.stats?.[statTab] || { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0, currentStreak: 0, bestStreak: 0 };
-                const winRate = activeStats.gamesPlayed ? Math.round(((activeStats.gamesWon || 0) / activeStats.gamesPlayed) * 100) : 0;
-                const hasStreak = statTab !== 'total';
+          <ModalBody>
+            <div className="mode-tabs" style={{ marginBottom: '1.5rem' }}>
+              {[
+                { id: 'total', label: 'Total', icon: '🌍' },
+                { id: 'solo', label: 'Solo', icon: '👤' },
+                { id: 'versus', label: 'Versus', icon: '⚔️' },
+                { id: 'party', label: 'Party', icon: '👥' }
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  className={`mode-tab ${statTab === tab.id ? 'tab-active' : ''}`}
+                  onClick={() => setStatTab(tab.id)}
+                  style={{ fontSize: '0.82rem', padding: '0.6rem 0.2rem' }}
+                >
+                  {tab.icon} {tab.label}
+                </button>
+              ))}
+            </div>
 
-                // Use cached records for Total tab
-                const mostUsedWord = statTab === 'total' ? (profile?.stats?.total?.mostUsedWord || '---') : 'N/A';
-                const longestWord = statTab === 'total' ? (profile?.stats?.total?.longestWord || '---') : 'N/A';
+            {(() => {
+              const activeStats = profile?.stats?.[statTab] || { wordsFormed: 0, gamesPlayed: 0, gamesWon: 0, currentStreak: 0, bestStreak: 0 };
+              const winRate = activeStats.gamesPlayed ? Math.round(((activeStats.gamesWon || 0) / activeStats.gamesPlayed) * 100) : 0;
+              const hasStreak = statTab !== 'total';
 
-                return (
-                  <div style={{ animation: 'fadeIn 0.3s ease-out' }}>
-                    <div style={{ display: 'flex', justifyContent: 'center', gap: '1rem', marginBottom: '2rem', textAlign: 'center' }}>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: '2.2rem', fontWeight: 800, color: 'var(--text-main)', lineHeight: 1.1 }}>
-                          {activeStats.gamesPlayed || 0}
-                        </div>
-                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: '0.3rem' }}>
-                          {activeStats.gamesPlayed === 1 ? 'Game' : 'Games'}
-                        </div>
+              const mostUsedWord = statTab === 'total' ? (profile?.stats?.total?.mostUsedWord || '---') : 'N/A';
+              const longestWord = statTab === 'total' ? (profile?.stats?.total?.longestWord || '---') : 'N/A';
+
+              return (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'center', gap: '1rem', marginBottom: '2rem', textAlign: 'center' }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '2.2rem', fontWeight: 800, color: 'var(--text-main)', lineHeight: 1.1 }}>
+                        {activeStats.gamesPlayed || 0}
                       </div>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: '2.2rem', fontWeight: 800, color: 'var(--text-main)', lineHeight: 1.1 }}>
-                          {winRate}<span style={{ fontSize: '1.2rem', opacity: 0.6 }}>%</span>
-                        </div>
-                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: '0.3rem' }}>Win Rate</div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: '0.3rem' }}>
+                        {activeStats.gamesPlayed === 1 ? 'Game' : 'Games'}
                       </div>
                     </div>
-
-                    <StatBlock 
-                      label="Words Formed" 
-                      value={activeStats.wordsFormed || 0} 
-                      color="var(--glow-success)" 
-                      glowColor="rgba(16, 185, 129, 0.3)" 
-                    />
-
-                    {hasStreak && (
-                      <>
-                        <StatBlock label="Current Streak" value={activeStats.currentStreak || 0} />
-                        <StatBlock 
-                          label="Best Streak" 
-                          value={activeStats.bestStreak || 0} 
-                          color="#f43f5e" 
-                          glowColor="rgba(244, 63, 94, 0.3)" 
-                        />
-                      </>
-                    )}
-
-                    {!hasStreak && (
-                      <>
-                        <StatBlock label="Most Used Word" value={mostUsedWord} isWord={true} />
-                        <StatBlock 
-                          label="Longest Word" 
-                          value={longestWord} 
-                          isWord={true} 
-                          color="#f43f5e" 
-                          glowColor="rgba(244, 63, 94, 0.3)" 
-                        />
-                      </>
-                    )}
-                  </div>
-                );
-              })()}
-            </div>
-
-            <div style={{ textAlign: 'center', marginTop: '1.5rem', flexShrink: 0 }}>
-              <button className="primary" onClick={() => setShowStats(false)}>Close</button>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
-
-      {showWordBank && createPortal(
-        <div className="popup-overlay" onClick={() => setShowWordBank(false)}>
-          <div className="rules-modal" style={{ maxHeight: '85vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
-            <h2 style={{ display: 'flex', alignItems: 'baseline', gap: '0.75rem', color: 'var(--glow-color)', marginBottom: '1.5rem', marginTop: 0, flexShrink: 0 }}>
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ alignSelf: 'center' }}><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
-              <span style={{ display: 'flex', alignItems: 'baseline', gap: '0.4rem' }}>
-                Word Bank
-                <span style={{ fontSize: '0.85rem', opacity: 0.5, fontWeight: 400 }}>({profile?.stats?.total?.uniqueWords || 0})</span>
-              </span>
-            </h2>
-
-            <div className="modal-body">
-              {(() => {
-                if (wordBankLoading) {
-                  return <div style={{ textAlign: 'center', padding: '2rem' }}><span className="spinner" /> Loading word bank...</div>;
-                }
-
-                const words = wordBank || {};
-                const wordList = Object.keys(words).sort();
-                
-                if (wordList.length === 0) {
-                  return (
-                    <div style={{ textAlign: 'center', padding: '3rem 1rem', opacity: 0.5 }}>
-                      <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>📚</div>
-                      <p>Your word bank is empty. Play some games to start collecting words!</p>
-                    </div>
-                  );
-                }
-
-                const groups = wordList.reduce((acc, word) => {
-                  const first = word[0].toUpperCase();
-                  if (!acc[first]) acc[first] = [];
-                  acc[first].push({ word, count: words[word] });
-                  return acc;
-                }, {});
-
-                return Object.keys(groups).sort().map(letter => (
-                  <div key={letter} style={{ marginBottom: '1.5rem' }}>
-                    <div style={{ 
-                      fontSize: '0.9rem', 
-                      color: 'var(--glow-color)', 
-                      fontWeight: 800, 
-                      marginBottom: '0.75rem', 
-                      borderBottom: '1px solid rgba(255,255,255,0.1)',
-                      paddingBottom: '0.25rem',
-                      display: 'flex',
-                      alignItems: 'baseline',
-                      gap: '0.5rem'
-                    }}>
-                      {letter}
-                      <span style={{ fontSize: '0.7rem', opacity: 0.5, fontWeight: 400 }}>({groups[letter].length})</span>
-                    </div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                      {groups[letter].map(item => (
-                        <div 
-                          key={item.word} 
-                          title={`Formed ${item.count} time${item.count > 1 ? 's' : ''}`}
-                          style={{
-                            padding: '0.4rem 0.8rem',
-                            background: 'rgba(255,255,255,0.05)',
-                            border: '1px solid var(--glass-border)',
-                            borderRadius: '8px',
-                            fontSize: '0.9rem',
-                            color: 'var(--text-main)',
-                            letterSpacing: '0.05em',
-                            display: 'flex',
-                            alignItems: 'flex-start',
-                            gap: '0.4rem'
-                          }}
-                        >
-                          {item.word}
-                          <span style={{ fontSize: '0.7rem', color: 'var(--glow-success)', opacity: 0.8, marginTop: '0.15rem' }}>×{item.count}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ));
-              })()}
-            </div>
-
-            <div style={{ textAlign: 'center', marginTop: '1.5rem', flexShrink: 0 }}>
-              <button className="primary" onClick={() => setShowWordBank(false)}>Close</button>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
-
-      {showSettings && createPortal(
-        <div className="popup-overlay" onClick={() => setShowSettings(false)}>
-          <div className="rules-modal" onClick={e => e.stopPropagation()}>
-            <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', color: 'var(--glow-color)', marginBottom: '2rem', marginTop: 0 }}>
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-              Settings
-            </h2>
-            <div className="modal-body">
-              <div className="settings-group">
-                <label className="settings-label">Account</label>
-                <div style={{
-                  padding: '1rem',
-                  background: 'rgba(255,255,255,0.05)',
-                  border: '1px solid var(--glass-border)',
-                  borderRadius: '16px',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '1rem'
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                    <span style={{ fontSize: '1.25rem' }}>💎</span>
-                    <div style={{ display: 'flex', flexDirection: 'column' }}>
-                      <span style={{ color: 'var(--text-main)', fontWeight: 600, fontSize: '1rem', letterSpacing: '0.04em' }}>
-                        {profile?.username || 'Guest'}
-                      </span>
-                      <span style={{ fontSize: '0.75rem', color: user.isAnonymous ? 'var(--text-muted)' : 'var(--glow-success)' }}>
-                        {user.isAnonymous ? 'Guest Account' : 'Verified Account'}
-                      </span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '2.2rem', fontWeight: 800, color: 'var(--text-main)', lineHeight: 1.1 }}>
+                        {winRate}<span style={{ fontSize: '1.2rem', opacity: 0.6 }}>%</span>
+                      </div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: '0.3rem' }}>Win Rate</div>
                     </div>
                   </div>
 
-                  {user.isAnonymous ? (
-                    <div style={{
-                      padding: '0.75rem',
-                      background: 'rgba(255,255,255,0.04)',
-                      borderRadius: '12px',
-                      border: '1px solid rgba(255,255,255,0.08)'
-                    }}>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.75rem', lineHeight: 1.4 }}>
-                        Your stats are only saved on this device. Link an email to backup your progress.
-                      </div>
-                      <button className="secondary" onClick={() => { setShowSettings(false); setShowLinkModal(true); }} style={{ width: '100%', fontSize: '0.85rem', padding: '0.5rem' }}>
-                        ✉️ Link Email
-                      </button>
-                    </div>
-                  ) : (
-                    <div style={{
-                      padding: '0.75rem',
-                      background: 'rgba(16, 185, 129, 0.08)',
-                      borderRadius: '12px',
-                      border: '1px solid rgba(16, 185, 129, 0.2)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '0.5rem',
-                      color: 'var(--glow-success)'
-                    }}>
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
-                      <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>
-                        Account linked with <span style={{ fontWeight: 400, opacity: 0.85 }}>{profile?.email || user.email}</span>
-                      </span>
-                    </div>
+                  <StatBlock 
+                    label="Words Formed" 
+                    value={activeStats.wordsFormed || 0} 
+                    color="var(--glow-success)" 
+                    glowColor="rgba(16, 185, 129, 0.3)" 
+                  />
+
+                  {hasStreak && (
+                    <>
+                      <StatBlock label="Current Streak" value={activeStats.currentStreak || 0} />
+                      <StatBlock 
+                        label="Best Streak" 
+                        value={activeStats.bestStreak || 0} 
+                        color="#f43f5e" 
+                        glowColor="rgba(244, 63, 94, 0.3)" 
+                      />
+                    </>
+                  )}
+
+                  {!hasStreak && (
+                    <>
+                      <StatBlock label="Most Used Word" value={mostUsedWord} isWord={true} />
+                      <StatBlock 
+                        label="Longest Word" 
+                        value={longestWord} 
+                        isWord={true} 
+                        color="#f43f5e" 
+                        glowColor="rgba(244, 63, 94, 0.3)" 
+                      />
+                    </>
                   )}
                 </div>
-              </div>
+              );
+            })()}
+          </ModalBody>
 
-              <div className="settings-group">
-                <label className="settings-label">App Interface</label>
-                <select className="glass-select" value="en" disabled>
-                  <option value="en">English</option>
-                </select>
-              </div>
-
-              <div className="settings-group">
-                <label className="settings-label">Word Translation</label>
-                <select className="glass-select" value="zh-TW" disabled>
-                  <option value="zh-TW">繁體中文</option>
-                </select>
-              </div>
-            </div>
-
-            <div style={{ textAlign: 'center', marginTop: '1.5rem', flexShrink: 0 }}>
-              <button className="primary" onClick={() => setShowSettings(false)}>Close</button>
-            </div>
-          </div>
-        </div>,
-        document.body
+          <ModalFooter balanced className="modal-action-divider">
+            <button className="primary" onClick={() => setActivePopup(null)}>Close</button>
+          </ModalFooter>
+        </Modal>
       )}
 
-      {showRules && createPortal(
-        <div className="popup-overlay" onClick={() => setShowRules(false)}>
-          <div className="rules-modal" onClick={e => e.stopPropagation()}>
-            <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', color: 'var(--glow-color)', marginBottom: '2rem', marginTop: 0 }}>
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-              How to Play
-            </h2>
-            <div className="modal-body">
-              <div className="mode-tabs" style={{ marginBottom: '1.5rem' }}>
-                {MODES.map(m => (
-                  <button
-                    key={m.id}
-                    className={`mode-tab ${tutorialMode === m.id ? 'tab-active' : ''}`}
-                    onClick={() => setTutorialMode(m.id)}
-                  >
-                    {m.icon} {m.label}
-                  </button>
-                ))}
-              </div>
-              {tutorialMode === 'versus' ? (
-                <div className="tutorial-visual" style={{ padding: '0.5rem 0' }}>
-                  <div style={{ marginBottom: '2rem' }}>
-                    <div style={{ display: 'flex', justifyContent: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
-                      <div style={{ width: '42px', height: '42px', border: '2px solid var(--glow-color)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem', color: 'var(--glow-color)', background: 'rgba(56, 189, 248, 0.05)' }}>S</div>
-                      <div style={{ width: '42px', height: '42px', border: '2px dashed rgba(255,255,255,0.15)', borderRadius: '10px' }}></div>
-                      <div style={{ width: '42px', height: '42px', border: '2px dashed rgba(255,255,255,0.15)', borderRadius: '10px' }}></div>
-                      <div style={{ width: '42px', height: '42px', border: '2px dashed rgba(255,255,255,0.15)', borderRadius: '10px' }}></div>
-                      <div style={{ width: '42px', height: '42px', border: '2px solid var(--glow-color)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem', color: 'var(--glow-color)', background: 'rgba(56, 189, 248, 0.05)' }}>T</div>
-                    </div>
-                    <p style={{ textAlign: 'center', fontSize: '1rem', color: 'var(--text-main)', fontWeight: 700, marginBottom: '0.25rem' }}>1. Start & End Letters</p>
-                    <p style={{ textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>Form a word that begins and ends with the letters shown on screen.</p>
+      {activePopup === 'wordbank' && (
+        <Modal onClose={() => setActivePopup(null)}>
+          <ModalTitle icon={<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ alignSelf: 'center' }}><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>} style={{ marginBottom: '1.5rem' }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+              Word Bank
+              <span style={{ fontSize: '0.85rem', opacity: 0.5, fontWeight: 600 }}>({profile?.stats?.total?.uniqueWords || 0})</span>
+            </span>
+          </ModalTitle>
+
+          <ModalBody>
+            {(() => {
+              if (wordBankLoading) {
+                return <div style={{ textAlign: 'center', padding: '2rem' }}><span className="spinner" /> Loading word bank...</div>;
+              }
+
+              const words = wordBank || {};
+              const wordList = Object.keys(words).sort();
+              
+              if (wordList.length === 0) {
+                return (
+                  <div style={{ textAlign: 'center', padding: '3rem 1rem', opacity: 0.5 }}>
+                    <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>📚</div>
+                    <p>Your word bank is empty. Play some games to start collecting words!</p>
                   </div>
+                );
+              }
 
-                  <div style={{ marginBottom: '2rem' }}>
-                    <div style={{ display: 'flex', justifyContent: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
-                      <div style={{ width: '42px', height: '42px', background: 'rgba(255,255,255,0.08)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem' }}>S</div>
-                      <div style={{ width: '42px', height: '42px', background: 'var(--glow-color)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem', color: '#000', boxShadow: '0 0 15px var(--glow-color)' }}>M</div>
-                      <div style={{ width: '42px', height: '42px', background: 'var(--glow-color)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem', color: '#000', boxShadow: '0 0 15px var(--glow-color)' }}>A</div>
-                      <div style={{ width: '42px', height: '42px', background: 'var(--glow-color)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem', color: '#000', boxShadow: '0 0 15px var(--glow-color)' }}>R</div>
-                      <div style={{ width: '42px', height: '42px', background: 'rgba(255,255,255,0.08)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem' }}>T</div>
-                    </div>
-                    <p style={{ textAlign: 'center', fontSize: '1rem', color: 'var(--text-main)', fontWeight: 700, marginBottom: '0.25rem' }}>2. Meet the Length</p>
-                    <p style={{ textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>Ensure your word meets the minimum length requirement for the round.</p>
+              const groups = wordList.reduce((acc, word) => {
+                const first = word[0].toUpperCase();
+                if (!acc[first]) acc[first] = [];
+                acc[first].push({ word, count: words[word] });
+                return acc;
+              }, {});
+
+              return Object.keys(groups).sort().map(letter => (
+                <div key={letter} style={{ marginBottom: '1.5rem' }}>
+                  <div style={{ 
+                    fontSize: '0.9rem', 
+                    color: 'var(--glow-color)', 
+                    fontWeight: 800, 
+                    marginBottom: '0.75rem', 
+                    borderBottom: '1px solid rgba(255,255,255,0.1)',
+                    paddingBottom: '0.25rem',
+                    display: 'flex',
+                    alignItems: 'baseline',
+                    gap: '0.5rem'
+                  }}>
+                    {letter}
+                    <span style={{ fontSize: '0.7rem', opacity: 0.5, fontWeight: 400 }}>({groups[letter].length})</span>
                   </div>
-
-                  <div style={{ background: 'rgba(56, 189, 248, 0.08)', padding: '1.25rem', borderRadius: '16px', border: '1px solid rgba(56, 189, 248, 0.2)', textAlign: 'center' }}>
-                    <div style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>🏆</div>
-                    <p style={{ fontSize: '1rem', color: 'var(--glow-color)', fontWeight: 800, marginBottom: '0.25rem' }}>3. Race to Submit</p>
-                    <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>Be the first to submit a valid word! Reach the target score to win the match.</p>
-                  </div>
-                </div>
-              ) : (
-                <div style={{
-                  textAlign: 'center',
-                  fontSize: '2.5rem',
-                  fontWeight: 800,
-                  margin: '4rem 0',
-                  color: 'var(--text-muted)',
-                  letterSpacing: '0.05em',
-                  textTransform: 'uppercase',
-                  opacity: 0.5
-                }}>
-                  {RULES[tutorialMode]}
-                </div>
-              )}
-            </div>
-            <div style={{ textAlign: 'center' }}>
-              <button className="primary" onClick={() => setShowRules(false)}>Close</button>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
-
-      {/* Link Account Modal */}
-      {showLinkModal && <LinkAccount onClose={() => setShowLinkModal(false)} username={profile?.username} />}
-
-
-      {showRoomModal && matchData && createPortal(
-        <div className="popup-overlay">
-            <div className="rules-modal" onClick={e => e.stopPropagation()}>
-              <h2 style={{ color: 'var(--glow-color)', marginBottom: '1.25rem', marginTop: 0, fontSize: '1.75rem', textAlign: 'center', flexShrink: 0 }}>
-                Game Room
-              </h2>
-
-              <div className="tags-row" style={{ marginBottom: '1.25rem', flexShrink: 0 }}>
-                <span className="badge-tag badge-versus">Versus Mode</span>
-                <span className={`badge-tag ${matchData?.isPublic ? 'badge-public' : 'badge-private'}`}>
-                  {matchData?.isPublic ? 'Public' : 'Private'}
-                </span>
-              </div>
-
-              {/* Tab bar */}
-              <div className="game-tabs" style={{ marginBottom: '1.25rem', flexShrink: 0 }}>
-                <button
-                  className={`game-tab${roomTab === 'room' ? ' game-tab-active' : ''}`}
-                  onClick={() => setRoomTab('room')}
-                >Room</button>
-                <button
-                  className={`game-tab${roomTab === 'invite' ? ' game-tab-active' : ''}`}
-                  onClick={() => setRoomTab('invite')}
-                >Invite</button>
-                <button
-                  className={`game-tab${roomTab === 'setup' ? ' game-tab-active' : ''}`}
-                  onClick={() => setRoomTab('setup')}
-                >Setup</button>
-              </div>
-
-              <div className="modal-body">
-                {/* Room tab */}
-                {roomTab === 'room' && (() => {
-                  const gamesWonByUid = {
-                    [matchData?.player1Id]: matchData?.player1GamesWon || 0,
-                    ...(matchData?.player2Id ? { [matchData?.player2Id]: matchData?.player2GamesWon || 0 } : {}),
-                  };
-                  const totalGamesWon = Object.values(gamesWonByUid).reduce((s, v) => s + v, 0);
-                  return (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
-                      {/* Players with count */}
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <label className="settings-label" style={{ marginBottom: 0 }}>Players</label>
-                        <span style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--glow-color)' }}>{roomPlayers.length}/2</span>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                    {groups[letter].map(item => (
+                      <div 
+                        key={item.word} 
+                        title={`Formed ${item.count} time${item.count > 1 ? 's' : ''}`}
+                        style={{
+                          padding: '0.4rem 0.8rem',
+                          background: 'rgba(255,255,255,0.05)',
+                          border: '1px solid var(--glass-border)',
+                          borderRadius: '8px',
+                          fontSize: '0.9rem',
+                          color: 'var(--text-main)',
+                          letterSpacing: '0.05em',
+                          display: 'flex',
+                          alignItems: 'flex-start',
+                          gap: '0.4rem'
+                        }}
+                      >
+                        {item.word}
+                        <span style={{ fontSize: '0.7rem', color: 'var(--glow-success)', opacity: 0.8, marginTop: '0.15rem' }}>×{item.count}</span>
                       </div>
-                      <div className="room-player-slot filled">
-                        {roomPlayers[0]?.isLoading ? (
+                    ))}
+                  </div>
+                </div>
+              ));
+            })()}
+          </ModalBody>
+
+          <ModalFooter balanced className="modal-action-divider">
+            <button className="primary" onClick={() => setActivePopup(null)}>Close</button>
+          </ModalFooter>
+        </Modal>
+      )}
+
+      {activePopup === 'settings' && (
+        <Modal onClose={() => setActivePopup(null)}>
+          <ModalTitle icon={<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>}>
+            Settings
+          </ModalTitle>
+          <ModalBody>
+            <div className="settings-group">
+              <label className="settings-label">Account</label>
+              <div style={{
+                padding: '1rem',
+                background: 'rgba(255,255,255,0.05)',
+                border: '1px solid var(--glass-border)',
+                borderRadius: '16px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '1rem'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <span style={{ fontSize: '1.25rem' }}>💎</span>
+                  <div style={{ display: 'flex', flexDirection: 'column' }}>
+                    <span style={{ color: 'var(--text-main)', fontWeight: 600, fontSize: '1rem', letterSpacing: '0.04em' }}>
+                      {profile?.username || 'Guest'}
+                    </span>
+                    <span style={{ fontSize: '0.75rem', color: user.isAnonymous ? 'var(--text-muted)' : 'var(--glow-success)' }}>
+                      {user.isAnonymous ? 'Guest Account' : 'Verified Account'}
+                    </span>
+                  </div>
+                </div>
+
+                {user.isAnonymous ? (
+                  <div style={{
+                    padding: '0.75rem',
+                    background: 'rgba(255,255,255,0.04)',
+                    borderRadius: '12px',
+                    border: '1px solid rgba(255,255,255,0.08)'
+                  }}>
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.75rem', lineHeight: 1.4 }}>
+                      Your stats are only saved on this device. Link an email to backup your progress.
+                    </div>
+                    <button className="secondary" onClick={() => setActivePopup('link')} style={{ width: '100%', fontSize: '0.85rem', padding: '0.5rem' }}>
+                      ✉️ Link Email
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{
+                    padding: '0.75rem',
+                    background: 'rgba(16, 185, 129, 0.08)',
+                    borderRadius: '12px',
+                    border: '1px solid rgba(16, 185, 129, 0.2)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.5rem',
+                    color: 'var(--glow-success)'
+                  }}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+                    <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>
+                      Account linked with <span style={{ fontWeight: 400, opacity: 0.85 }}>{profile?.email || user.email}</span>
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="settings-group">
+              <label className="settings-label">App Interface</label>
+              <select className="glass-select" value="en" disabled>
+                <option value="en">English</option>
+              </select>
+            </div>
+
+            <div className="settings-group">
+              <label className="settings-label">Word Translation</label>
+              <select className="glass-select" value="zh-TW" disabled>
+                <option value="zh-TW">繁體中文</option>
+              </select>
+            </div>
+          </ModalBody>
+
+          <ModalFooter balanced className="modal-action-divider">
+            <button className="primary" onClick={() => setActivePopup(null)}>Close</button>
+          </ModalFooter>
+        </Modal>
+      )}
+
+      {activePopup === 'rules' && (
+        <Modal onClose={() => setActivePopup(null)}>
+          <ModalTitle icon={<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>}>
+            How to Play
+          </ModalTitle>
+          <ModalBody>
+            <div className="mode-tabs" style={{ marginBottom: '1.5rem' }}>
+              {MODES.map(m => (
+                <button
+                  key={m.id}
+                  className={`mode-tab ${tutorialMode === m.id ? 'tab-active' : ''}`}
+                  onClick={(e) => { e.stopPropagation(); setTutorialMode(m.id); }}
+                >
+                  {m.icon} {m.label}
+                </button>
+              ))}
+            </div>
+            {tutorialMode === 'versus' ? (
+              <div className="tutorial-visual" style={{ padding: '0.5rem 0' }}>
+                <div style={{ marginBottom: '2rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+                    <div style={{ width: '42px', height: '42px', border: '2px solid var(--glow-color)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem', color: 'var(--glow-color)', background: 'rgba(56, 189, 248, 0.05)' }}>S</div>
+                    <div style={{ width: '42px', height: '42px', border: '2px dashed rgba(255,255,255,0.15)', borderRadius: '10px' }}></div>
+                    <div style={{ width: '42px', height: '42px', border: '2px dashed rgba(255,255,255,0.15)', borderRadius: '10px' }}></div>
+                    <div style={{ width: '42px', height: '42px', border: '2px dashed rgba(255,255,255,0.15)', borderRadius: '10px' }}></div>
+                    <div style={{ width: '42px', height: '42px', border: '2px solid var(--glow-color)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem', color: 'var(--glow-color)', background: 'rgba(56, 189, 248, 0.05)' }}>T</div>
+                  </div>
+                  <p style={{ textAlign: 'center', fontSize: '1rem', color: 'var(--text-main)', fontWeight: 700, marginBottom: '0.25rem' }}>1. Start & End Letters</p>
+                  <p style={{ textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>Form a word that begins and ends with the letters shown on screen.</p>
+                </div>
+
+                <div style={{ marginBottom: '2rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+                    <div style={{ width: '42px', height: '42px', background: 'rgba(255,255,255,0.08)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem' }}>S</div>
+                    <div style={{ width: '42px', height: '42px', background: 'var(--glow-color)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem', color: '#000', boxShadow: '0 0 15px var(--glow-color)' }}>M</div>
+                    <div style={{ width: '42px', height: '42px', background: 'var(--glow-color)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem', color: '#000', boxShadow: '0 0 15px var(--glow-color)' }}>A</div>
+                    <div style={{ width: '42px', height: '42px', background: 'var(--glow-color)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem', color: '#000', boxShadow: '0 0 15px var(--glow-color)' }}>R</div>
+                    <div style={{ width: '42px', height: '42px', background: 'rgba(255,255,255,0.08)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.25rem' }}>T</div>
+                  </div>
+                  <p style={{ textAlign: 'center', fontSize: '1rem', color: 'var(--text-main)', fontWeight: 700, marginBottom: '0.25rem' }}>2. Meet the Length</p>
+                  <p style={{ textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>Ensure your word meets the minimum length requirement for the round.</p>
+                </div>
+
+                <div style={{ background: 'rgba(56, 189, 248, 0.08)', padding: '1.25rem', borderRadius: '16px', border: '1px solid rgba(56, 189, 248, 0.2)', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>🏆</div>
+                  <p style={{ fontSize: '1rem', color: 'var(--glow-color)', fontWeight: 800, marginBottom: '0.25rem' }}>3. Race to Submit</p>
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>Be the first to submit a valid word! Reach the target score to win the match.</p>
+                </div>
+              </div>
+            ) : (
+              <div style={{
+                textAlign: 'center',
+                fontSize: '2.5rem',
+                fontWeight: 800,
+                margin: '4rem 0',
+                color: 'var(--text-muted)',
+                letterSpacing: '0.05em',
+                textTransform: 'uppercase',
+                opacity: 0.5
+              }}>
+                {RULES[tutorialMode]}
+              </div>
+            )}
+          </ModalBody>
+          <ModalFooter balanced className="modal-action-divider">
+            <button className="primary" onClick={() => setActivePopup(null)}>Close</button>
+          </ModalFooter>
+        </Modal>
+      )}
+
+      {activePopup === 'link' && <LinkAccount onClose={() => setActivePopup(null)} username={profile?.username} />}
+
+
+      {activePopup === 'room' && matchData && (
+        <Modal onClose={null} measureKey={roomTab}>
+          <ModalTitle style={{ fontSize: '1.75rem', justifyContent: 'center', textAlign: 'center', marginBottom: '1.25rem' }}>
+            Game Room
+          </ModalTitle>
+
+          <div className="tags-row" style={{ marginBottom: '1.25rem', flexShrink: 0 }}>
+            <span className="badge-tag badge-versus">Versus Mode</span>
+            <span className={`badge-tag ${matchData?.isPublic ? 'badge-public' : 'badge-private'}`}>
+              {matchData?.isPublic ? 'Public' : 'Private'}
+            </span>
+          </div>
+
+          {/* Tab bar */}
+          <div className="game-tabs" style={{ marginBottom: '1.25rem', flexShrink: 0 }}>
+            <button
+              className={`game-tab${roomTab === 'room' ? ' game-tab-active' : ''}`}
+              onClick={(e) => { e.stopPropagation(); setRoomTab('room'); }}
+            >Room</button>
+            <button
+              className={`game-tab${roomTab === 'invite' ? ' game-tab-active' : ''}`}
+              onClick={(e) => { e.stopPropagation(); setRoomTab('invite'); }}
+            >Invite</button>
+            <button
+              className={`game-tab${roomTab === 'setup' ? ' game-tab-active' : ''}`}
+              onClick={(e) => { e.stopPropagation(); setRoomTab('setup'); }}
+            >Setup</button>
+          </div>
+
+          <ModalBody>
+            {/* Room tab */}
+            {roomTab === 'room' && (() => {
+              return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <label className="settings-label" style={{ marginBottom: 0 }}>Players</label>
+                  <span className="room-player-count-badge">{roomPlayers.length}/2</span>
+                </div>
+                  <div className={`room-player-slot ${roomPlayers[0]?.isLoading ? 'waiting' : 'filled'}`}>
+                    {roomPlayers[0]?.isLoading ? (
+                      <span className="spinner" style={{ width: '1.2rem', height: '1.2rem', opacity: 0.5, flexShrink: 0 }} />
+                    ) : (
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                    )}
+                    <span className="room-player-name" style={{ color: roomPlayers[0]?.isLoading ? 'var(--text-muted)' : 'inherit', fontStyle: roomPlayers[0]?.isLoading ? 'italic' : 'normal' }}>
+                      {roomPlayers[0]?.username}
+                    </span>
+                    <span className="room-player-badge">Host</span>
+                  </div>
+                  <div className={`room-player-slot ${roomPlayers[1] ? (roomPlayers[1].isLoading ? 'waiting' : 'filled') : 'waiting'}`}>
+                    {roomPlayers[1] ? (
+                      <>
+                        {roomPlayers[1].isLoading ? (
                           <span className="spinner" style={{ width: '1.2rem', height: '1.2rem', opacity: 0.5, flexShrink: 0 }} />
                         ) : (
                           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
                         )}
-                        <span className="room-player-name" style={{ color: roomPlayers[0]?.isLoading ? 'var(--text-muted)' : 'inherit', fontStyle: roomPlayers[0]?.isLoading ? 'italic' : 'normal' }}>
-                          {roomPlayers[0]?.isLoading ? 'Loading...' : (roomPlayers[0]?.username || '...')}
+                        <span className="room-player-name" style={{ color: roomPlayers[1].isLoading ? 'var(--text-muted)' : 'inherit', fontStyle: roomPlayers[1].isLoading ? 'italic' : 'normal' }}>
+                          {roomPlayers[1].username}
                         </span>
-                        <span className="room-player-badge">Host</span>
-                      </div>
-                      <div className={`room-player-slot ${roomPlayers[1] ? 'filled' : 'waiting'}`}>
-                        {roomPlayers[1] ? (
-                          <>
-                            {roomPlayers[1].isLoading ? (
-                              <span className="spinner" style={{ width: '1.2rem', height: '1.2rem', opacity: 0.5, flexShrink: 0 }} />
-                            ) : (
-                              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                            )}
-                            <span className="room-player-name" style={{ color: roomPlayers[1].isLoading ? 'var(--text-muted)' : 'inherit', fontStyle: roomPlayers[1].isLoading ? 'italic' : 'normal' }}>
-                              {roomPlayers[1].username}
+                      </>
+                    ) : (
+                      <>
+                        <span className="spinner" style={{ width: '1.2rem', height: '1.2rem', opacity: 0.5, flexShrink: 0 }} />
+                        <span className="room-player-name" style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontWeight: 500 }}>Waiting...</span>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Stats card */}
+                  {roomPlayers.length === 2 && (() => {
+                    const currentGame = {
+                      p1: matchData?.player1Score || 0,
+                      p2: matchData?.player2Score || 0,
+                      w1: matchData?.player1GamesWon || 0,
+                      w2: matchData?.player2GamesWon || 0
+                    };
+                    const allTime = pairStats ? (() => {
+                      const p1IsFirst = pairStats.player1Id === matchData?.player1Id;
+                      return {
+                        p1: p1IsFirst ? (pairStats.player1GamesWon || 0) : (pairStats.player2GamesWon || 0),
+                        p2: p1IsFirst ? (pairStats.player2GamesWon || 0) : (pairStats.player1GamesWon || 0),
+                      };
+                    })() : null;
+
+                    const isCurrent = statsView === 'current';
+                    const label = isCurrent ? 'MATCH' : 'ALL-TIME';
+                    const active = isCurrent ? currentGame : allTime;
+                    if (!active) return null;
+
+                    const hint = pairStats ? (isCurrent ? 'Tap for all-time' : 'Tap for match') : null;
+
+                    const isP2 = roomPlayers[1]?.uid === user.uid;
+                    const name1 = isP2 ? roomPlayers[1].username : roomPlayers[0].username;
+                    const name2 = isP2 ? roomPlayers[0].username : roomPlayers[1].username;
+                    const score1 = isP2 ? active.p2 : active.p1;
+                    const score2 = isP2 ? active.p1 : active.p2;
+                    const win1 = isP2 ? active.w2 : active.w1;
+                    const win2 = isP2 ? active.w1 : active.w2;
+
+                    return (
+                      <div
+                        className={`room-series ${pairStats ? 'room-series-tappable' : ''}`}
+                        onClick={pairStats ? () => setStatsView(v => v === 'current' ? 'alltime' : 'current') : undefined}
+                        style={{ textAlign: 'center' }}
+                      >
+                        <div className="room-series-label" style={{ justifyContent: 'center', marginBottom: '0.5rem' }}>
+                          <span>{label}</span>
+                        </div>
+
+                        <div className="room-series-versus" style={{ marginBottom: hint ? '0.5rem' : 0 }}>
+                          <span className="room-series-name">{name1}</span>
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                            <span className="room-series-score">
+                              {isCurrent ? win1 : score1}
+                              <span className="room-series-sep">–</span>
+                              {isCurrent ? win2 : score2}
                             </span>
-                          </>
-                        ) : (
-                          <>
-                            <span className="spinner" style={{ width: '1.2rem', height: '1.2rem', opacity: 0.5, flexShrink: 0 }} />
-                            <span className="room-player-name" style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontWeight: 500 }}>Waiting...</span>
-                          </>
+                          </div>
+                          <span className="room-series-name right">{name2}</span>
+                        </div>
+
+                        {hint && (
+                          <div className="room-series-hint" style={{ opacity: 0.4 }}>
+                            {hint}
+                          </div>
                         )}
                       </div>
+                    );
+                  })()}
+                </div>
+              );
+            })()}
 
-                      {/* Stats card — tap anywhere to switch session ↔ all-time */}
-                      {roomPlayers.length === 2 && (() => {
-                        const currentGame = {
-                          p1: matchData?.player1Score || 0,
-                          p2: matchData?.player2Score || 0,
-                          w1: matchData?.player1GamesWon || 0,
-                          w2: matchData?.player2GamesWon || 0
-                        };
-                        const allTime = pairStats ? (() => {
-                          const p1IsFirst = pairStats.player1Id === matchData?.player1Id;
-                          return {
-                            p1: p1IsFirst ? (pairStats.player1GamesWon || 0) : (pairStats.player2GamesWon || 0),
-                            p2: p1IsFirst ? (pairStats.player2GamesWon || 0) : (pairStats.player1GamesWon || 0),
-                          };
-                        })() : null;
-
-                        const isCurrent = statsView === 'current';
-                        const label = isCurrent ? 'MATCH' : 'ALL-TIME';
-                        const active = isCurrent ? currentGame : allTime;
-                        if (!active) return null;
-
-                        const hint = pairStats ? (isCurrent ? 'Tap for all-time' : 'Tap for match') : null;
-
-                        const isP2 = roomPlayers[1]?.uid === user.uid;
-                        const name1 = isP2 ? roomPlayers[1].username : roomPlayers[0].username;
-                        const name2 = isP2 ? roomPlayers[0].username : roomPlayers[1].username;
-                        const score1 = isP2 ? active.p2 : active.p1;
-                        const score2 = isP2 ? active.p1 : active.p2;
-                        const win1 = isP2 ? active.w2 : active.w1;
-                        const win2 = isP2 ? active.w1 : active.w2;
-
-                        return (
-                          <div
-                            className={`room-series${pairStats ? ' room-series-tappable' : ''}`}
-                            onClick={pairStats ? () => setStatsView(v => v === 'current' ? 'alltime' : 'current') : undefined}
-                            style={{ textAlign: 'center' }}
-                          >
-                            <div className="room-series-label" style={{ justifyContent: 'center', marginBottom: '0.5rem' }}>
-                              <span>{label}</span>
-                            </div>
-
-                            <div className="room-series-versus" style={{ marginBottom: hint ? '0.5rem' : 0 }}>
-                              <span className="room-series-name">{name1}</span>
-                              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                                <span className="room-series-score">
-                                  {isCurrent ? win1 : score1}
-                                  <span className="room-series-sep">–</span>
-                                  {isCurrent ? win2 : score2}
-                                </span>
-                              </div>
-                              <span className="room-series-name right">{name2}</span>
-                            </div>
-
-                            {hint && (
-                              <div className="room-series-hint" style={{ opacity: 0.4 }}>
-                                {hint}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  );
-                })()}
-
-                {/* Invite tab */}
-                {roomTab === 'invite' && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem' }}>
-                    <div className="settings-group" style={{ marginBottom: 0 }}>
-                      <label className="settings-label">Room Visibility</label>
-                      <div className="game-tabs" style={{ marginBottom: 0 }}>
-                        <button
-                          className={`game-tab${matchData?.isPublic ? '' : ' game-tab-active'}`}
-                          onClick={() => updateRoomSetting('isPublic', false)}
-                          disabled={user.uid !== matchData?.player1Id}
-                        >Private</button>
-                        <button
-                          className={`game-tab${matchData?.isPublic ? ' game-tab-active' : ''}`}
-                          onClick={() => updateRoomSetting('isPublic', true)}
-                          disabled={user.uid !== matchData?.player1Id}
-                        >Public</button>
-                      </div>
-                      <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.5rem', textAlign: 'center' }}>
-                        {matchData?.isPublic
-                          ? 'Anyone can join.'
-                          : 'Only people with the room code can join.'}
-                      </p>
-                    </div>
-
-                    <div className="settings-group" style={{ marginBottom: 0 }}>
-                      <label className="settings-label">Room Code</label>
-                      <div
-                        className="room-code-section copyable"
-                        onClick={copyRoomCode}
-                        style={{ padding: '0.75rem', marginBottom: 0 }}
-                      >
-                        <div className="code" style={{ fontSize: '1.75rem' }}>{matchData?.roomCode}</div>
-                        <div className={`room-code-hint${copiedCode ? ' copied' : ''}`}>
-                          {copiedCode ? '✓ Copied!' : 'Tap to copy'}
-                        </div>
-                      </div>
-                      <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.5rem', textAlign: 'center' }}>
-                        Share this code with a friend to invite them to your room.
-                      </p>
-                    </div>
+            {/* Invite tab */}
+            {roomTab === 'invite' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                <div className="settings-group" style={{ marginBottom: 0 }}>
+                  <label className="settings-label">Room Visibility</label>
+                  <div className="game-tabs" style={{ marginBottom: 0 }}>
+                    <button
+                      className={`game-tab${matchData?.isPublic ? '' : ' game-tab-active'}`}
+                      onClick={() => updateRoomSetting('isPublic', false)}
+                      disabled={user.uid !== matchData?.player1Id}
+                    >Private</button>
+                    <button
+                      className={`game-tab${matchData?.isPublic ? ' game-tab-active' : ''}`}
+                      onClick={() => updateRoomSetting('isPublic', true)}
+                      disabled={user.uid !== matchData?.player1Id}
+                    >Public</button>
                   </div>
-                )}
+                  <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.5rem', textAlign: 'center' }}>
+                    {matchData?.isPublic
+                      ? 'Anyone can join.'
+                      : 'Only people with the room code can join.'}
+                  </p>
+                </div>
 
-                {/* Setup tab */}
-                {roomTab === 'setup' && (
-                  <div style={{ marginBottom: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-
-                    <div className="settings-group" style={{ marginBottom: 0 }}>
-                      <label className="settings-label">Letter Selection</label>
-                      <div className="game-tabs" style={{ marginBottom: 0 }}>
-                        <button
-                          className={`game-tab${matchData?.letterMode === 'system' ? ' game-tab-active' : ''}`}
-                          onClick={() => updateRoomSetting('letterMode', 'system')}
-                          disabled={user.uid !== matchData?.player1Id}
-                        >System</button>
-                        <button
-                          className={`game-tab${matchData?.letterMode === 'players' ? ' game-tab-active' : ''}`}
-                          onClick={() => updateRoomSetting('letterMode', 'players')}
-                          disabled={user.uid !== matchData?.player1Id}
-                        >Players</button>
-                      </div>
-                    </div>
-
-                    <div className="settings-group" style={{ marginBottom: 0 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                        <label className="settings-label" style={{ marginBottom: 0 }}>Min Length</label>
-                        <div style={{
-                          background: 'var(--glow-color)',
-                          color: '#000',
-                          fontWeight: 800,
-                          fontSize: '1.1rem',
-                          padding: '0.25rem 0.75rem',
-                          borderRadius: '8px',
-                          minWidth: '40px',
-                          textAlign: 'center'
-                        }}>
-                          {matchData?.minWordLength || 3}
-                        </div>
-                      </div>
-                      <div style={{ position: 'relative', padding: '0.25rem 0' }}>
-                        <input
-                          type="range"
-                          className="custom-range"
-                          min="3"
-                          max="10"
-                          value={matchData?.minWordLength || 3}
-                          onChange={(e) => updateRoomSetting('minWordLength', parseInt(e.target.value))}
-                          disabled={user.uid !== matchData?.player1Id}
-                          style={{
-                            width: '100%',
-                            height: '16px',
-                            background: `linear-gradient(to right, var(--glow-color) ${((matchData?.minWordLength || 3) - 3) / 7 * 100}%, rgba(255,255,255,0.15) ${((matchData?.minWordLength || 3) - 3) / 7 * 100}%)`,
-                            borderRadius: '8px',
-                            accentColor: 'transparent',
-                            cursor: user.uid !== matchData?.player1Id ? 'not-allowed' : 'pointer',
-                            appearance: 'none',
-                            WebkitAppearance: 'none'
-                          }}
-                        />
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.5rem' }}>
-                          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>3</span>
-                          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>10</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="settings-group" style={{ marginBottom: 0 }}>
-                      <label className="settings-label">Target Points</label>
-                      <div className="game-tabs" style={{ marginBottom: 0 }}>
-                        {[1, 3, 5, 10, 20].map(n => (
-                          <button
-                            key={n}
-                            className={`game-tab${(matchData?.winTarget || 5) === n ? ' game-tab-active' : ''}`}
-                            onClick={() => updateRoomSetting('winTarget', n)}
-                            disabled={user.uid !== matchData?.player1Id}
-                          >{n}</button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-              </div>
-              <div className="modal-footer">
-                <button className="secondary btn-responsive" onClick={cancelRoom}>
-                  Leave Room
-                </button>
-                {user.uid === matchData?.player1Id ? (
-                  <button
-                    className="primary btn-responsive"
-                    onClick={startGame}
-                    disabled={roomPlayers.length < 2}
+                <div className="settings-group" style={{ marginBottom: 0 }}>
+                  <label className="settings-label">Room Code</label>
+                  <div
+                    className="room-code-section copyable"
+                    onClick={copyRoomCode}
+                    style={{ padding: '0.75rem', marginBottom: 0 }}
                   >
-                    Start Game
-                  </button>
-                ) : (
-                  <div className="btn-responsive" style={{ 
-                    background: 'rgba(56, 189, 248, 0.05)', 
-                    border: '1px solid rgba(56, 189, 248, 0.15)', 
-                    borderRadius: '12px', 
-                    color: 'var(--text-muted)', 
-                    fontWeight: 600, 
-                    padding: '0.75rem 0.5rem', 
-                    textAlign: 'center',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    minHeight: '44px'
-                  }}>
-                    Waiting for host...
+                    <div className="code" style={{ fontSize: '1.75rem' }}>{matchData?.roomCode}</div>
+                    <div className={`room-code-hint${copiedCode ? ' copied' : ''}`}>
+                      {copiedCode ? '✓ Copied!' : 'Tap to copy'}
+                    </div>
                   </div>
-                )}
+                  <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.5rem', textAlign: 'center' }}>
+                    Share this code with a friend to invite them to your room.
+                  </p>
+                </div>
               </div>
-            </div>
-        </div>,
-        document.body
+            )}
+
+            {/* Setup tab */}
+            {roomTab === 'setup' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+
+                <div className="settings-group" style={{ marginBottom: 0 }}>
+                  <label className="settings-label">Letter Selection</label>
+                  <div className="game-tabs" style={{ marginBottom: 0 }}>
+                    <button
+                      className={`game-tab${matchData?.letterMode === 'system' ? ' game-tab-active' : ''}`}
+                      onClick={() => updateRoomSetting('letterMode', 'system')}
+                      disabled={user.uid !== matchData?.player1Id}
+                    >System</button>
+                    <button
+                      className={`game-tab${matchData?.letterMode === 'players' ? ' game-tab-active' : ''}`}
+                      onClick={() => updateRoomSetting('letterMode', 'players')}
+                      disabled={user.uid !== matchData?.player1Id}
+                    >Players</button>
+                  </div>
+                </div>
+
+                <div className="settings-group" style={{ marginBottom: 0 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                    <label className="settings-label" style={{ marginBottom: 0 }}>Min Length</label>
+                    <div className="room-setting-active-chip">
+                      {matchData?.minWordLength || 3}
+                    </div>
+                  </div>
+                  <div style={{ position: 'relative', padding: '0.25rem 0' }}>
+                    <input
+                      type="range"
+                      className="custom-range"
+                      min="3"
+                      max="10"
+                      value={matchData?.minWordLength || 3}
+                      onChange={(e) => updateRoomSetting('minWordLength', parseInt(e.target.value))}
+                      disabled={user.uid !== matchData?.player1Id}
+                      style={{
+                        width: '100%',
+                        height: '16px',
+                        background: `linear-gradient(to right, rgba(255,255,255,0.16) ${((matchData?.minWordLength || 3) - 3) / 7 * 100}%, rgba(255,255,255,0.06) ${((matchData?.minWordLength || 3) - 3) / 7 * 100}%)`,
+                        borderRadius: '8px',
+                        accentColor: 'transparent',
+                        cursor: user.uid !== matchData?.player1Id ? 'not-allowed' : 'pointer',
+                        appearance: 'none',
+                        WebkitAppearance: 'none'
+                      }}
+                    />
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.5rem' }}>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>3</span>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>10</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="settings-group" style={{ marginBottom: 0 }}>
+                  <label className="settings-label">Target Points</label>
+                  <div className="game-tabs" style={{ marginBottom: 0 }}>
+                    {[1, 3, 5, 10, 20].map(n => (
+                      <button
+                        key={n}
+                        className={`game-tab${(matchData?.winTarget || 5) === n ? ' game-tab-active' : ''}`}
+                        onClick={() => updateRoomSetting('winTarget', n)}
+                        disabled={user.uid !== matchData?.player1Id}
+                      >{n}</button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+          </ModalBody>
+          <ModalFooter className="modal-footer">
+            <button className="secondary btn-responsive" onClick={cancelRoom}>
+              Leave Room
+            </button>
+            {user.uid === matchData?.player1Id ? (
+              <button
+                className="primary btn-responsive"
+                onClick={startGame}
+                disabled={roomPlayers.length < 2}
+              >
+                Start Game
+              </button>
+            ) : (
+              <div className="btn-responsive" style={{ 
+                background: 'rgba(56, 189, 248, 0.05)', 
+                border: '1px solid rgba(56, 189, 248, 0.15)', 
+                borderRadius: '12px', 
+                color: 'var(--text-muted)', 
+                fontWeight: 600, 
+                padding: '0.75rem 0.5rem', 
+                textAlign: 'center',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                minHeight: '44px'
+              }}>
+                Waiting for host...
+              </div>
+            )}
+          </ModalFooter>
+        </Modal>
       )}
 
 
-      {showJoinModal && createPortal(
-        <div className="popup-overlay" onClick={() => { setShowJoinModal(false); setJoinCodeInput(''); setJoinError(null); }}>
-          <div className="rules-modal" onClick={e => e.stopPropagation()}>
-            <h2 style={{ color: 'var(--glow-color)', marginBottom: '1.5rem', marginTop: 0 }}>
-              Join by Code
-            </h2>
-            <div className="modal-body">
-              <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem', marginBottom: '1rem' }}>
-                Enter the 6-character room code from your friend.
-              </p>
-              <input
-                type="text"
-                placeholder="AB3K7Q"
-                maxLength={6}
-                value={joinCodeInput}
-                onChange={e => { setJoinCodeInput(e.target.value.toUpperCase()); setJoinError(null); }}
-                autoFocus
-                style={{ letterSpacing: '0.2em', fontWeight: 800 }}
-              />
-              {joinError && (
-                <div className="error-message" style={{ marginBottom: '0.75rem' }}>{joinError}</div>
-              )}
-            </div>
-            <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
-              <button style={{ flex: 1 }} onClick={() => { setShowJoinModal(false); setJoinCodeInput(''); setJoinError(null); }}>Cancel</button>
+      {activePopup === 'join' && (
+        <Modal onClose={() => { setActivePopup(null); setJoinCodeInput(''); setJoinError(null); }}>
+          <ModalTitle style={{ marginBottom: '1.5rem' }}>
+            Join by Code
+          </ModalTitle>
+          <ModalBody>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem', marginBottom: '1rem' }}>
+              Enter the 6-character room code from your friend.
+            </p>
+            <input
+              type="text"
+              placeholder="AB3K7Q"
+              maxLength={6}
+              value={joinCodeInput}
+              onChange={e => { setJoinCodeInput(e.target.value.toUpperCase()); setJoinError(null); }}
+              autoFocus
+              style={{ letterSpacing: '0.2em', fontWeight: 800 }}
+            />
+            {joinError && (
+              <div className="error-message" style={{ marginBottom: '0.75rem' }}>{joinError}</div>
+            )}
+          </ModalBody>
+          <ModalFooter className="modal-action-divider">
+            <div className="window-actions full-width">
+              <button style={{ flex: 1 }} onClick={() => { setActivePopup(null); setJoinCodeInput(''); setJoinError(null); }}>Cancel</button>
               <button
                 className="primary"
                 style={{ flex: 1 }}
@@ -1567,17 +1482,8 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
                 {joining ? <><span className="spinner" /> Joining...</> : 'Join'}
               </button>
             </div>
-          </div>
-        </div>,
-        document.body
-      )}
-
-      {showLinkModal && createPortal(
-        <LinkAccount
-          username={profile?.username || 'Guest'}
-          onClose={() => setShowLinkModal(false)}
-        />,
-        document.body
+          </ModalFooter>
+        </Modal>
       )}
 
       <div className="lobby-container">
@@ -1610,16 +1516,16 @@ export default function Lobby({ user, profile, setMatchId, initialMatchId, onRoo
 
         {/* Utility Dock (Tutorial & Settings) */}
         <div className="util-opt3-pill">
-          <button className="util-opt3-btn" onClick={() => { setTutorialMode(mode); setShowRules(true); }} title="Tutorial">
+          <button className="util-opt3-btn" onClick={() => { setTutorialMode(mode); setActivePopup('rules'); }} title="Tutorial">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
           </button>
-          <button className="util-opt3-btn" onClick={() => setShowStats(true)} title="Stats">
+          <button className="util-opt3-btn" onClick={() => setActivePopup('stats')} title="Stats">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
           </button>
-          <button className="util-opt3-btn" title="Word Bank" onClick={() => setShowWordBank(true)}>
+          <button className="util-opt3-btn" title="Word Bank" onClick={() => setActivePopup('wordbank')}>
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
           </button>
-          <button className="util-opt3-btn" onClick={() => setShowSettings(true)} title="Settings">
+          <button className="util-opt3-btn" onClick={() => setActivePopup('settings')} title="Settings">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
           </button>
         </div>
